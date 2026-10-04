@@ -1,0 +1,6 @@
+# Copy to .dev.vars (gitignored) and fill in real values locally.
+# Production: set each with `npx wrangler secret put NAME` — never commit real values.
+JWT_SECRET=your_long_random_string_here
+STRIPE_SECRET_KEY=your_secret_key_here
+STRIPE_WEBHOOK_SECRET=your_webhook_secret_here
+ANTHROPIC_API_KEY=your_key_here

@@ -1,0 +1,19 @@
+# No secrets here. Secrets: `npx wrangler secret put <NAME>` (see .dev.vars.example).
+name = "hccgsa-broadcast-api"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+
+[vars]
+ENVIRONMENT = "production"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "hccgsa-broadcast"
+database_id = "REPLACE_WITH_D1_ID_FROM_wrangler_d1_create"
+
+[[r2_buckets]]
+binding = "MEDIA"
+bucket_name = "hccgsa-broadcast-media"
+
+[ai]
+binding = "AI"
