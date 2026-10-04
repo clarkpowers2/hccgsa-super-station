@@ -5,7 +5,9 @@ export interface Env {
   ENVIRONMENT: string;
   JWT_SECRET: string;
   STRIPE_SECRET_KEY: string;
-  STRIPE_WEBHOOK_SECRET: string;
+  STRIPE_WEBHOOK_SECRET: string; // platform events endpoint
+  STRIPE_CONNECT_WEBHOOK_SECRET: string; // connected-account events endpoint
+  APP_URL: string;
   ANTHROPIC_API_KEY: string;
   R2_ACCOUNT_ID: string;
   R2_ACCESS_KEY_ID: string;

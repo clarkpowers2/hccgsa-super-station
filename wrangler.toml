@@ -6,6 +6,7 @@ compatibility_date = "2025-01-01"
 [vars]
 ENVIRONMENT = "production"
 R2_BUCKET_NAME = "hccgsa-broadcast-media"
+APP_URL = "https://broadcast.hccgsa.org"
 
 [[d1_databases]]
 binding = "DB"

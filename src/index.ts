@@ -1,6 +1,10 @@
 import { Hono } from "hono";
 import { auth } from "./auth";
 import { creator } from "./episodes";
+import { billing } from "./billing";
+import { creatorBilling } from "./creator-billing";
+import { webhooks } from "./webhooks";
+import { StripeError } from "./stripe";
 import { signedViewUrl } from "./media";
 import type { AppBindings } from "./types";
 
@@ -9,6 +13,9 @@ const app = new Hono<AppBindings>();
 app.get("/api/health", (c) => c.json({ status: "ok", environment: c.env.ENVIRONMENT }));
 app.route("/api/auth", auth);
 app.route("/api/creator", creator);
+app.route("/api/creator", creatorBilling);
+app.route("/api", billing);
+app.route("/api/webhooks", webhooks);
 
 app.get("/api/episodes", async (c) => {
   const { results } = await c.env.DB.prepare(
@@ -43,6 +50,10 @@ app.get("/api/episodes/:id", async (c) => {
 });
 
 app.onError((err, c) => {
+  if (err instanceof StripeError) {
+    console.error("stripe error", err.status, err.code); // code only: messages can echo request details
+    return c.json({ error: "payment provider error" }, 502);
+  }
   console.error("unhandled error", err.message); // never log request bodies or secrets
   return c.json({ error: "internal error" }, 500);
 });

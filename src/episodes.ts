@@ -84,10 +84,10 @@ creator.use("*", requireAuth, requireCreator);
 
 creator.get("/profile", async (c) => {
   const row = await c.env.DB.prepare(
-    "SELECT id, email, creator_name, bio, avatar_url, stripe_account_id FROM users WHERE id = ?",
+    "SELECT id, email, creator_name, bio, avatar_url, stripe_account_id, stripe_ready, subscription_price_cents FROM users WHERE id = ?",
   )
     .bind(c.get("user").sub)
-    .first<{ id: string; email: string; creator_name: string; bio: string | null; avatar_url: string | null; stripe_account_id: string | null }>();
+    .first<{ id: string; email: string; creator_name: string; bio: string | null; avatar_url: string | null; stripe_account_id: string | null; stripe_ready: number; subscription_price_cents: number | null }>();
   if (!row) return c.json({ error: "not found" }, 404);
   return c.json({
     id: row.id,
@@ -96,11 +96,13 @@ creator.get("/profile", async (c) => {
     bio: row.bio,
     avatarUrl: row.avatar_url,
     payoutsConnected: row.stripe_account_id !== null,
+    payoutsReady: row.stripe_ready === 1,
+    subscriptionPriceCents: row.subscription_price_cents,
   });
 });
 
 creator.put("/profile", async (c) => {
-  const body = (await c.req.json().catch(() => ({}))) as { creatorName?: unknown; bio?: unknown };
+  const body = (await c.req.json().catch(() => ({}))) as { creatorName?: unknown; bio?: unknown; subscriptionPriceCents?: unknown };
   const sets: string[] = [];
   const vals: unknown[] = [];
   if (body.creatorName !== undefined) {
@@ -113,6 +115,13 @@ creator.put("/profile", async (c) => {
     if (typeof body.bio !== "string" || body.bio.length > 500) return c.json({ error: "bio must be at most 500 characters" }, 400);
     sets.push("bio = ?");
     vals.push(body.bio);
+  }
+  if (body.subscriptionPriceCents !== undefined) {
+    const p = body.subscriptionPriceCents;
+    if (p !== null && (typeof p !== "number" || !Number.isInteger(p) || p < 100 || p > MAX_PRICE_CENTS))
+      return c.json({ error: `subscriptionPriceCents must be an integer between 100 and ${MAX_PRICE_CENTS}, or null` }, 400);
+    sets.push("subscription_price_cents = ?");
+    vals.push(p);
   }
   if (!sets.length) return c.json({ error: "nothing to update" }, 400);
   await c.env.DB.prepare(`UPDATE users SET ${sets.join(", ")}, updated_at = datetime('now') WHERE id = ?`)
