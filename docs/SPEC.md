@@ -3,7 +3,7 @@
 **Owner:** Nathaniel Clarke / HCCGSA LLC
 **Mission:** Sovereign, uncensored broadcasting. Creators own content, audience, and revenue.
 **Stack:** Cloudflare (Workers + D1 + R2 + Workers AI, Pages for frontend) + Stripe Connect + Claude API
-**Status:** Milestone 1 (foundation) built. Milestones 2–5 pending.
+**Status:** Milestones 1–2 built. Milestones 3–5 pending.
 
 ## Changes from v1.0 (and why)
 
@@ -33,18 +33,28 @@ See `migrations/0001_init.sql` (source of truth): `users`, `episodes`, `subscrip
 ## API
 
 Auth (built): `POST /api/auth/register`, `/creator-register`, `/login`, `/logout`, `/refresh-token`
-Public (partial): `GET /api/health`, `GET /api/episodes`
+Public: `GET /api/health`, `GET /api/episodes`, `GET /api/episodes/:id` (metadata only; storage keys never exposed)
 
-Pending: creator profile/episodes/subscribers/payouts/analytics, episode detail/stream/transcript, subscriptions, purchases, `POST /api/webhooks/stripe` (signature verification required).
+Creator (built, requires creator token):
+- `GET/PUT /api/creator/profile`
+- `POST /api/creator/episodes` (create draft) · `GET /api/creator/episodes?published=&limit=&offset=` · `GET/PUT /api/creator/episodes/:id`
+- `POST /api/creator/episodes/:id/uploads` → presigned R2 PUT URL (1 hour; video 2 GB, audio 500 MB, thumbnail 5 MB; content type is signed)
+- `POST /api/creator/episodes/:id/uploads/complete` → server verifies the object in R2 (prefix, type, size) before attaching it
+- `GET /api/creator/episodes/:id/media/:kind` → 15-minute owner preview URL
+- `GET /api/creator/analytics`
+
+Upload flow: create episode → request upload URL → browser PUTs file directly to R2 with the returned headers → call `complete` → publish (requires video or audio).
+
+Pending: creator subscribers/payouts, paid stream/transcript access, subscriptions, purchases, `POST /api/webhooks/stripe` (signature verification required).
 
 ## Secrets
 
-Names only (values live in `.dev.vars` / Cloudflare secrets): `JWT_SECRET`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `ANTHROPIC_API_KEY`.
+Names only (values live in `.dev.vars` / Cloudflare secrets): `JWT_SECRET`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `ANTHROPIC_API_KEY`, `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`. `R2_BUCKET_NAME` is a non-secret var in `wrangler.toml`. The R2 endpoint is derived as `https://<R2_ACCOUNT_ID>.r2.cloudflarestorage.com`.
 
 ## Milestones
 
 1. **Foundation** — repo, schema, auth API ✅
-2. Episodes + R2 upload + creator dashboard API
+2. Episodes + R2 signed uploads + creator dashboard API ✅ (tested with fakes; not yet against live R2)
 3. Stripe Connect: subscriptions, purchases, webhook, payouts
 4. AI: Whisper transcription, Claude metadata, transcript search
 5. Next.js frontend on Pages; security audit; deploy
