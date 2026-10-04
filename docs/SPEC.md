@@ -3,7 +3,7 @@
 **Owner:** Nathaniel Clarke / HCCGSA LLC
 **Mission:** Sovereign, uncensored broadcasting. Creators own content, audience, and revenue.
 **Stack:** Cloudflare (Workers + D1 + R2 + Workers AI, Pages for frontend) + Stripe Connect + Claude API
-**Status:** Milestones 1–3 built. Milestones 4–5 pending.
+**Status:** Milestones 1–4 built. Milestone 5 (frontend, deploy) pending.
 
 ## Changes from v1.0 (and why)
 
@@ -51,7 +51,12 @@ Billing (built):
 - Playback: `GET /api/episodes/:id/stream?kind=video|audio` → 1-hour signed URL for the creator, a buyer of that episode, or an active subscriber to the creator; everyone else gets 403
 - Webhooks (signature-verified, replay-safe): `POST /api/webhooks/stripe` (checkout.session.completed, checkout.session.async_payment_succeeded, invoice.paid, customer.subscription.updated/deleted) and `POST /api/webhooks/stripe-connect` (account.updated, payout.paid, payout.failed). Two endpoints, two signing secrets.
 
-Pending: transcript access (milestone 4), subscriptions, purchases, `POST /api/webhooks/stripe` (signature verification required).
+AI transcripts (built):
+- Creator: `POST /api/creator/episodes/:id/transcribe` (re-run; needs audio; 1-hour cooldown after a finished run), `GET /api/creator/episodes/:id/transcript`; episode objects now carry `transcriptStatus` (`none|pending|processing|completed|failed`), `transcriptError`, `hasTranscript`, `summary`, `aiTags`, `keyQuotes`
+- Public: `GET /api/episodes/:id` and the list include `summary`, `aiTags`, `keyQuotes`, `hasTranscript`; the transcript text is **not** public
+- Gated: `GET /api/episodes/:id/transcript` follows the same rule as playback (creator, buyer of that episode, or active subscriber)
+
+Pending: subscriptions, purchases, `POST /api/webhooks/stripe` (signature verification required).
 
 ## Secrets
 
@@ -62,7 +67,7 @@ Names only (values live in `.dev.vars` / Cloudflare secrets): `JWT_SECRET`, `STR
 1. **Foundation** — repo, schema, auth API ✅
 2. Episodes + R2 signed uploads + creator dashboard API ✅ (tested with fakes; not yet against live R2)
 3. Stripe Connect: subscriptions, purchases, webhooks, payout ledger, paid playback ✅ (tested against a stubbed Stripe; not yet in Stripe test mode)
-4. AI: Whisper transcription, Claude metadata, transcript search
+4. AI: Whisper transcription, Claude metadata ✅ (tested with fakes at the network edge; not yet against live Workers AI / Claude). Transcript search is deferred.
 5. Next.js frontend on Pages; security audit; deploy
 
 ## Definition of done (launch)
@@ -80,3 +85,15 @@ End-to-end: creator registers, uploads and publishes an episode; viewer pays via
 - **Platform bears Stripe's processing fees and dispute/refund liability** on destination charges. Platform net per charge is 20% minus Stripe's fee (about 2.9% + 30¢ in the US), so very low prices have thin margins. Connect account/payout fees also apply. Review Stripe's current pricing before setting a minimum price.
 - **Ledger.** `revenue` has one row per successful charge (unique per PaymentIntent / invoice), so replays can't double count.
 - **Not yet handled:** refunds and disputes (handle in the Stripe Dashboard for now; reversing the creator transfer needs a deliberate policy), sales tax, non-USD currencies, non-US creators, free episodes.
+
+## AI transcripts (v1.1 decisions)
+
+- **Speech-to-text is Cloudflare Workers AI (Whisper), not Claude.** Claude does not accept audio. Claude writes the summary, tags and quotes from the transcript.
+- **Audio only.** Workers cannot run ffmpeg, so transcripts are made from the uploaded *audio* file. Video-only episodes get no transcript until an audio track is uploaded.
+- **Always asynchronous.** Uploading audio queues the episode; a cron trigger (every minute) processes one episode per tick. States: `none → pending → processing → completed | failed`. Jobs retry up to 3 times, stuck jobs are recovered after 20 minutes, and speech-to-text progress is checkpointed so a failed summary retry does not pay for transcription twice. A result for audio that was replaced mid-run is discarded.
+- **Known limit: 24 MiB audio** (about 25 minutes of 128 kbps MP3) per episode for automatic transcription. Longer files are marked `failed` with a clear message. Lifting this needs audio chunking (decode and split), which Workers cannot do on their own; options are a separate service or Cloudflare Containers. The cap is `TRANSCRIBE_MAX_BYTES`.
+- **Public vs paid.** Summary, tags and key quotes are public (they are the marketing for the episode). The full transcript is the paid content in text form, so it is gated like playback. Flip this deliberately if you want free transcripts for SEO.
+- **Quotes are verified.** A key quote is kept only if it appears word-for-word in the transcript, and its timestamp comes from the transcript, never from the model.
+- **Prompt-injection posture.** Transcripts and titles are untrusted text. They go to the model as data with an explicit instruction not to follow them, the answer is schema-constrained, and the only things stored are a bounded summary, short tags, and verified quotes.
+- **Model.** `ANTHROPIC_MODEL` (default `claude-opus-5-5`, effort `low`, with server-side refusal fallback). A cheaper model is a business choice you can make by changing that one variable.
+- **Not built:** Claude "cleanup" of the transcript (risk of altering what was said), transcript search, speaker labels, non-English testing (Whisper detects language; tags and summary follow the transcript's language, untested).

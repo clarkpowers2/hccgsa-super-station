@@ -1,7 +1,7 @@
 import { createRequire } from "node:module";
 import { readFileSync, readdirSync } from "node:fs";
 import type { DatabaseSync as DatabaseSyncType } from "node:sqlite";
-import app from "../src/index";
+import { app } from "../src/index";
 import type { Env } from "../src/types";
 
 // Vite does not resolve the node:sqlite builtin, so load it via require.
@@ -37,12 +37,17 @@ export function fakeD1(): D1Database {
 export interface FakeObject {
   size: number;
   httpMetadata?: { contentType?: string };
+  body?: Uint8Array;
 }
 
 export function fakeR2() {
   const objects = new Map<string, FakeObject>();
   const bucket = {
     head: async (k: string) => objects.get(k) ?? null,
+    get: async (k: string) => {
+      const o = objects.get(k);
+      return o ? { size: o.size, arrayBuffer: async () => (o.body ?? new Uint8Array(o.size)).buffer } : null;
+    },
     delete: async (k: string) => void objects.delete(k),
   } as unknown as R2Bucket;
   return { bucket, objects };

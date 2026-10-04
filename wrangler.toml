@@ -7,6 +7,8 @@ compatibility_date = "2025-01-01"
 ENVIRONMENT = "production"
 R2_BUCKET_NAME = "hccgsa-broadcast-media"
 APP_URL = "https://broadcast.hccgsa.org"
+ANTHROPIC_MODEL = "claude-opus-5-5" # swap for a cheaper model to cut cost; see docs/SPEC.md
+TRANSCRIBE_MAX_BYTES = "25165824"   # 24 MiB cap for automatic transcription
 
 [[d1_databases]]
 binding = "DB"
@@ -19,3 +21,6 @@ bucket_name = "hccgsa-broadcast-media"
 
 [ai]
 binding = "AI"
+
+[triggers]
+crons = ["* * * * *"] # transcription queue worker

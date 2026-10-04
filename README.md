@@ -24,3 +24,9 @@ Checks: `npm run typecheck` · `npm test`
 3. Put the secret key and both signing secrets in `.dev.vars` (local) and set them for production with
    `npx wrangler secret put STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET` / `STRIPE_CONNECT_WEBHOOK_SECRET`.
 4. Local webhook testing: `stripe listen --forward-to localhost:8787/api/webhooks/stripe` (Stripe CLI prints a temporary signing secret).
+
+## Transcripts setup (one-time)
+1. Workers AI needs no key: the `[ai]` binding in `wrangler.toml` is enough.
+2. Put your Anthropic key in `.dev.vars` (local) and run `npx wrangler secret put ANTHROPIC_API_KEY` for production. Never paste it into chat or commit it.
+3. The cron trigger in `wrangler.toml` (`* * * * *`) runs the queue. Transcribing a large audio file needs more CPU time than the Workers Free plan allows, so plan on the **Workers Paid plan** for this feature.
+4. Local test of the queue: `npx wrangler dev --test-scheduled`, then `curl "http://localhost:8787/__scheduled"`.

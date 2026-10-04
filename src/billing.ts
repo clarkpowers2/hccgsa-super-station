@@ -185,7 +185,15 @@ billing.get("/viewer/purchases", requireAuth, async (c) => {
 
 // ---- paid playback ---------------------------------------------------------
 
-// Access = the creator, a buyer of this episode, or an active subscriber to the creator.
+/** Access = the creator, a buyer of this episode, or an active subscriber to the creator. */
+export async function hasEpisodeAccess(env: Env, userId: string, ep: { id: string; creator_id: string }) {
+  return (
+    ep.creator_id === userId ||
+    (await hasPurchased(env, userId, ep.id)) ||
+    (await hasActiveSubscription(env, userId, ep.creator_id))
+  );
+}
+
 billing.get("/episodes/:id/stream", requireAuth, async (c) => {
   const userId = c.get("user").sub;
   const ep = await c.env.DB.prepare("SELECT id, creator_id, is_published, video_key, audio_key FROM episodes WHERE id = ?")
@@ -194,8 +202,7 @@ billing.get("/episodes/:id/stream", requireAuth, async (c) => {
   const isOwner = ep?.creator_id === userId;
   if (!ep || (!ep.is_published && !isOwner)) return c.json({ error: "not found" }, 404);
 
-  if (!isOwner && !(await hasPurchased(c.env, userId, ep.id)) && !(await hasActiveSubscription(c.env, userId, ep.creator_id)))
-    return c.json({ error: "purchase or subscription required" }, 403);
+  if (!(await hasEpisodeAccess(c.env, userId, ep))) return c.json({ error: "purchase or subscription required" }, 403);
 
   const requested = c.req.query("kind");
   if (requested !== undefined && (!isMediaKind(requested) || requested === "thumbnail"))
@@ -208,4 +215,17 @@ billing.get("/episodes/:id/stream", requireAuth, async (c) => {
   if (!url) return c.json({ error: "storage not configured" }, 503);
   if (!isOwner) await c.env.DB.prepare("UPDATE episodes SET view_count = view_count + 1 WHERE id = ?").bind(ep.id).run();
   return c.json({ url, kind, expiresInSeconds: 60 * 60 });
+});
+
+// The full transcript is the paid content in text form, so it follows the same access rule as playback.
+// Summary, tags and quotes are public (see GET /api/episodes/:id).
+billing.get("/episodes/:id/transcript", requireAuth, async (c) => {
+  const userId = c.get("user").sub;
+  const ep = await c.env.DB.prepare("SELECT id, creator_id, is_published, transcript_text FROM episodes WHERE id = ?")
+    .bind(c.req.param("id"))
+    .first<{ id: string; creator_id: string; is_published: number; transcript_text: string | null }>();
+  if (!ep || (!ep.is_published && ep.creator_id !== userId)) return c.json({ error: "not found" }, 404);
+  if (!(await hasEpisodeAccess(c.env, userId, ep))) return c.json({ error: "purchase or subscription required" }, 403);
+  if (!ep.transcript_text) return c.json({ error: "transcript not available" }, 404);
+  return c.json({ transcript: ep.transcript_text });
 });

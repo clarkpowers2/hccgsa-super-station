@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import type { Context } from "hono";
 import type { AppBindings } from "./types";
 import { requireAuth, requireCreator } from "./auth";
+import { enqueueTranscript } from "./pipeline";
 import {
   MEDIA_POLICY,
   UPLOAD_URL_TTL_SECONDS,
@@ -31,6 +32,12 @@ interface EpisodeRow {
   view_count: number;
   created_at: string;
   updated_at: string;
+  transcript_text: string | null;
+  summary: string | null;
+  ai_tags: string | null;
+  key_quotes: string | null;
+  transcript_error: string | null;
+  transcript_finished_at: string | null;
 }
 
 const MIN_PRICE_CENTS = 50; // Stripe's USD minimum charge
@@ -47,6 +54,11 @@ async function shape(env: AppBindings["Bindings"], r: EpisodeRow) {
     oneTimePriceCents: r.one_time_price_cents,
     viewCount: r.view_count,
     transcriptStatus: r.transcript_status,
+    transcriptError: r.transcript_error,
+    hasTranscript: r.transcript_text !== null,
+    summary: r.summary,
+    aiTags: r.ai_tags ? (JSON.parse(r.ai_tags) as string[]) : [],
+    keyQuotes: r.key_quotes ? (JSON.parse(r.key_quotes) as { text: string; timestamp: string | null }[]) : [],
     hasVideo: r.video_key !== null,
     hasAudio: r.audio_key !== null,
     thumbnailUrl: r.thumbnail_key ? await signedViewUrl(env, r.thumbnail_key) : null,
@@ -150,7 +162,7 @@ creator.post("/episodes", async (c) => {
 
   const id = crypto.randomUUID();
   await c.env.DB.prepare(
-    "INSERT INTO episodes (id, creator_id, title, description, metadata_tags, one_time_price_cents) VALUES (?, ?, ?, ?, ?, ?)",
+    "INSERT INTO episodes (id, creator_id, title, description, metadata_tags, one_time_price_cents, transcript_status) VALUES (?, ?, ?, ?, ?, ?, 'none')",
   )
     .bind(id, c.get("user").sub, body.title.trim(), (body.description as string | undefined) ?? null, JSON.stringify(tags), price)
     .run();
@@ -282,6 +294,7 @@ creator.post("/episodes/:id/uploads/complete", async (c) => {
   await c.env.DB.prepare(`UPDATE episodes SET ${policy.column} = ?, updated_at = datetime('now') WHERE id = ? AND creator_id = ?`)
     .bind(body.key, row.id, row.creator_id)
     .run();
+  if (kind === "audio") await enqueueTranscript(c.env, row.id); // new audio -> fresh transcript
   if (previous && previous !== body.key) {
     try {
       await c.env.MEDIA.delete(previous);
@@ -290,6 +303,30 @@ creator.post("/episodes/:id/uploads/complete", async (c) => {
     }
   }
   return c.json(await shape(c.env, (await findOwned(c, row.id))!));
+});
+
+// Re-run transcription (e.g. after a failure). Spending guard: a finished run can't be repeated for an hour.
+const RERUN_COOLDOWN_MINUTES = 60;
+creator.post("/episodes/:id/transcribe", async (c) => {
+  const row = await findOwned(c, c.req.param("id"));
+  if (!row) return c.json({ error: "not found" }, 404);
+  if (!row.audio_key) return c.json({ error: "upload an audio file first; transcripts are made from audio" }, 409);
+  if (row.transcript_status === "pending" || row.transcript_status === "processing")
+    return c.json({ error: "transcription is already in progress" }, 409);
+  if (row.transcript_finished_at) {
+    const waited = await c.env.DB.prepare("SELECT (julianday('now') - julianday(?)) * 1440 AS minutes").bind(row.transcript_finished_at).first<{ minutes: number }>();
+    if (waited && waited.minutes < RERUN_COOLDOWN_MINUTES)
+      return c.json({ error: "please wait before re-running", retryAfterMinutes: Math.ceil(RERUN_COOLDOWN_MINUTES - waited.minutes) }, 429);
+  }
+  await enqueueTranscript(c.env, row.id);
+  return c.json(await shape(c.env, (await findOwned(c, row.id))!), 202);
+});
+
+creator.get("/episodes/:id/transcript", async (c) => {
+  const row = await findOwned(c, c.req.param("id"));
+  if (!row) return c.json({ error: "not found" }, 404);
+  if (!row.transcript_text) return c.json({ error: "transcript not available", status: row.transcript_status }, 404);
+  return c.json({ transcript: row.transcript_text });
 });
 
 // Owner-only preview link (public/paid playback arrives with Stripe, milestone 3).
