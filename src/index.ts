@@ -1,10 +1,24 @@
 import { Hono } from "hono";
+import { cors } from "hono/cors";
 import { auth } from "./auth";
 import { creator } from "./episodes";
 import { signedViewUrl } from "./media";
 import type { AppBindings } from "./types";
 
 const app = new Hono<AppBindings>();
+
+// Browser dashboard origins; override with a comma-separated CORS_ORIGINS var.
+app.use(
+  "/api/*",
+  cors({
+    origin: (origin, c) => {
+      const allowed = (c.env.CORS_ORIGINS ?? "http://localhost:3000").split(",").map((o: string) => o.trim());
+      return allowed.includes(origin) ? origin : null;
+    },
+    allowHeaders: ["Authorization", "Content-Type"],
+    allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  }),
+);
 
 app.get("/api/health", (c) => c.json({ status: "ok", environment: c.env.ENVIRONMENT }));
 app.route("/api/auth", auth);
