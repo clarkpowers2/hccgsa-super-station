@@ -18,9 +18,14 @@ export interface Env {
   R2_BUCKET_NAME: string;
 }
 
+export type Role = "owner" | "admin" | "creator" | "guest";
+
 export interface AuthUser {
   sub: string;
   isCreator: boolean;
+  /** Null for viewer accounts that belong to no network. */
+  networkId: string | null;
+  role: Role;
 }
 
 export type AppBindings = {

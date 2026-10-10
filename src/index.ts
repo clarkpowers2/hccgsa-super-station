@@ -9,6 +9,7 @@ import { StripeError } from "./stripe";
 import { processNextTranscript } from "./pipeline";
 import type { Env } from "./types";
 import { signedViewUrl } from "./media";
+import { networks } from "./networks";
 import type { AppBindings } from "./types";
 
 const app = new Hono<AppBindings>();
@@ -32,6 +33,7 @@ app.route("/api/creator", creator);
 app.route("/api/creator", creatorBilling);
 app.route("/api", billing);
 app.route("/api/webhooks", webhooks);
+app.route("/api/networks", networks);
 
 app.get("/api/episodes", async (c) => {
   const { results } = await c.env.DB.prepare(
