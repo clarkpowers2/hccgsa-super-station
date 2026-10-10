@@ -291,7 +291,8 @@ Emails are unique across all networks, and each user belongs to exactly one netw
 **API Keys:**
 - Public key (for browser embeds) and private key (server-to-server) are shown once, at network creation
 - Only SHA-256 hashes are stored; keys cannot be recovered
-- Not yet built: key validation on requests, rate limiting (planned 1000 req/hr public), key rotation/regeneration endpoint
+- Validation + rate limiting: built on `GET /api/public/episodes/:id` (bearer key; `X-RateLimit-*` and `Retry-After` headers; open CORS for browser embeds). Counters live in D1 (`rate_limits`) because Workers isolates share no memory, at the cost of one small write per request. Scope is global (any network's key reads any published episode) until subdomain scoping.
+- Not yet built: key rotation/regeneration endpoint
 
 **R2 Key Prefix:**
 New uploads go under `networks/<network_id>/…`. Existing Phase 1 episodes keep their original keys and continue working.
@@ -323,7 +324,7 @@ Tokens issued before this change are rejected once; users log in again.
 - ☑ Network provisioning (signup → network + API keys + Stripe placeholder) works end-to-end
 - ☑ RBAC enforced on creator routes: guests are blocked, other networks' episodes are invisible
 - ☐ Each network's Stripe account receives correct payouts minus platform fee
-- ☐ API keys generate ✓, but validation and rate limiting are not built
+- ☑ API keys generate, validate (SHA-256 lookup) and rate-limit (D1 fixed-window counter: 1000/hr public, 10k/hr private)
 - ☐ Webhooks signed and routed to correct network handler (registration ✓; delivery, HMAC signing and retries not built)
 - ☑ Live streaming tables exist, schema supports guest RTMP ingest + recording storage
 - ☐ Backward compatible: Phase 1 endpoints work, but existing sessions must re-login once
@@ -599,7 +600,9 @@ Longest sequential dependency chain (blocks completion date):
 
 **Priority 4: User Management & Settings Endpoints — ✓ built (invites are onboarding links; email sending is Phase 3+)**
 
-Next: Priority 5 — Stripe Express provisioning, API key validation + rate limiting, webhook delivery.
+Done since: API key validation + rate limiting (5a).
+
+Next: Stripe Express provisioning (5b), webhook delivery + HMAC signing (5c), key rotation.
 
 Now that network provisioning and RBAC are working, build the management endpoints:
 
