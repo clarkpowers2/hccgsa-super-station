@@ -3,7 +3,7 @@ import { sign, verify } from "hono/jwt";
 import type { MiddlewareHandler } from "hono";
 import type { AppBindings, Env, Role } from "./types";
 import { hashPassword, verifyPassword } from "./password";
-import { provisionNetwork, type ProvisionedNetwork } from "./provision";
+import { provisionNetwork, sha256Hex, type ProvisionedNetwork } from "./provision";
 
 const ACCESS_TTL_SECONDS = 60 * 60 * 24; // 24h
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -23,12 +23,13 @@ export const requireAuth: MiddlewareHandler<AppBindings> = async (c, next) => {
     const p = await verify(token, c.env.JWT_SECRET, "HS256");
     // Tokens minted before multi-network (no role/network_id claims) are rejected: re-login.
     if (typeof p.role !== "string" || !ROLES.includes(p.role) || !("network_id" in p)) throw new Error("stale token");
-    c.set("user", {
-      sub: String(p.sub),
-      isCreator: p.isCreator === true,
-      networkId: typeof p.network_id === "string" ? p.network_id : null,
-      role: p.role as Role,
-    });
+    // The token proves identity; the user row is authoritative for membership, so revoked
+    // users and role changes take effect on the very next request.
+    const row = await c.env.DB.prepare("SELECT network_id, role, is_creator, deleted_at FROM users WHERE id = ?")
+      .bind(String(p.sub))
+      .first<{ network_id: string | null; role: Role; is_creator: number; deleted_at: string | null }>();
+    if (!row || row.deleted_at) throw new Error("revoked");
+    c.set("user", { sub: String(p.sub), isCreator: row.is_creator === 1, networkId: row.network_id, role: row.role });
   } catch {
     return c.json({ error: "unauthorized" }, 401);
   }
@@ -122,4 +123,38 @@ auth.post("/refresh-token", requireAuth, async (c) => {
     .first<{ id: string; is_creator: number; network_id: string | null; role: Role }>();
   if (!row) return c.json({ error: "unauthorized" }, 401);
   return c.json({ token: await issueToken(c.env, { id: row.id, isCreator: row.is_creator === 1, networkId: row.network_id, role: row.role }) });
+});
+
+// Public: redeem an onboarding link from POST /api/networks/:id/users.
+auth.post("/accept-invite", async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) as { token?: string; password?: string; creatorName?: string };
+  const password = body.password ?? "";
+  const name = body.creatorName?.trim() ?? "";
+  if (typeof body.token !== "string" || !body.token) return c.json({ error: "token required" }, 400);
+  if (password.length < 10) return c.json({ error: "password must be at least 10 characters" }, 400);
+  if (!name) return c.json({ error: "creatorName required" }, 400);
+
+  const invite = await c.env.DB.prepare(
+    "SELECT id, network_id, email, role FROM invites WHERE token_hash = ? AND accepted_at IS NULL AND expires_at > datetime('now')",
+  )
+    .bind(await sha256Hex(body.token))
+    .first<{ id: string; network_id: string; email: string; role: Role }>();
+  if (!invite) return c.json({ error: "invite is invalid or expired" }, 410);
+
+  const id = crypto.randomUUID();
+  const isCreator = invite.role !== "guest";
+  try {
+    // One batch: the invite can only be consumed together with the user insert.
+    await c.env.DB.batch([
+      c.env.DB.prepare("UPDATE invites SET accepted_at = datetime('now') WHERE id = ? AND accepted_at IS NULL").bind(invite.id),
+      c.env.DB.prepare(
+        "INSERT INTO users (id, email, password_hash, creator_name, is_creator, network_id, role) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      ).bind(id, invite.email, await hashPassword(password), name, isCreator ? 1 : 0, invite.network_id, invite.role),
+    ]);
+  } catch (e) {
+    if (String(e).includes("users.email")) return c.json({ error: "email already registered" }, 409);
+    throw e;
+  }
+  const token = await issueToken(c.env, { id, isCreator, networkId: invite.network_id, role: invite.role });
+  return c.json({ id, token, networkId: invite.network_id, role: invite.role }, 201);
 });
