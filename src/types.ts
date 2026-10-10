@@ -4,6 +4,7 @@ export interface Env {
   AI: Ai;
   ENVIRONMENT: string;
   JWT_SECRET: string;
+  CORS_ORIGINS?: string;
   STRIPE_SECRET_KEY: string;
   STRIPE_WEBHOOK_SECRET: string; // platform events endpoint
   STRIPE_CONNECT_WEBHOOK_SECRET: string; // connected-account events endpoint
