@@ -3,6 +3,7 @@ import { cors } from "hono/cors";
 import { auth } from "./auth";
 import { creator } from "./episodes";
 import { signedViewUrl } from "./media";
+import { networks } from "./networks";
 import type { AppBindings } from "./types";
 
 const app = new Hono<AppBindings>();
@@ -23,6 +24,7 @@ app.use(
 app.get("/api/health", (c) => c.json({ status: "ok", environment: c.env.ENVIRONMENT }));
 app.route("/api/auth", auth);
 app.route("/api/creator", creator);
+app.route("/api/networks", networks);
 
 app.get("/api/episodes", async (c) => {
   const { results } = await c.env.DB.prepare(

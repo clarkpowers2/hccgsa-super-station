@@ -73,7 +73,7 @@ describe("upload flow", () => {
     const { env, me, episodeId } = await setup();
     const r = await requestUpload(env, me.token, episodeId, { kind: "video", contentType: "video/mp4", sizeBytes: 1000 });
     expect(r.status).toBe(200);
-    expect(r.json.key).toMatch(new RegExp(`^${me.id}/${episodeId}/video/[0-9a-f-]+\\.mp4$`));
+    expect(r.json.key).toMatch(new RegExp(`^networks/net_[0-9a-f]+/${me.id}/${episodeId}/video/[0-9a-f-]+\\.mp4$`));
     const url = new URL(r.json.uploadUrl);
     expect(url.host).toBe("testaccount.r2.cloudflarestorage.com");
     expect(url.pathname).toBe(`/testbucket/${r.json.key}`);
