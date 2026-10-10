@@ -12,9 +12,9 @@ export interface ProvisionedNetwork {
 const toHex = (buf: ArrayBuffer | Uint8Array) =>
   [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
 
-const randomHex = (bytes: number) => toHex(crypto.getRandomValues(new Uint8Array(bytes)));
+export const randomHex = (bytes: number) => toHex(crypto.getRandomValues(new Uint8Array(bytes)));
 
-export const hashApiKey = async (key: string) =>
+export const sha256Hex = async (key: string) =>
   toHex(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(key)));
 
 function slugify(name: string) {
@@ -46,7 +46,7 @@ export async function provisionNetwork(
       `INSERT INTO networks (id, slug, display_name, owner_id, status,
          public_api_key_hash, public_api_key_hint, private_api_key_hash, private_api_key_hint)
        VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?)`,
-    ).bind(id, slug, displayName, userId, await hashApiKey(pub), pub.slice(-4), await hashApiKey(priv), priv.slice(-4)),
+    ).bind(id, slug, displayName, userId, await sha256Hex(pub), pub.slice(-4), await sha256Hex(priv), priv.slice(-4)),
     env.DB.prepare("UPDATE users SET network_id = ?, role = 'owner', updated_at = datetime('now') WHERE id = ?").bind(id, userId),
   ]);
   return { id, slug, displayName, status: "active", apiKeys: { public: pub, private: priv }, stripe: { status: "not_connected" } };

@@ -224,7 +224,7 @@ Accounts with no network (viewers) can create one later via `POST /api/networks/
   "exp": 1700000000
 }
 ```
-`network_id` is `null` for accounts that belong to no network. Tokens minted before multi-network (no `role`/`network_id`) are rejected with 401. Role changes reach a token on login or `/api/auth/refresh-token`. A `permissions` claim is not implemented yet; roles are the only gate.
+`network_id` is `null` for accounts that belong to no network. Tokens minted before multi-network (no `role`/`network_id`) are rejected with 401. `requireAuth` re-reads the user row on every request, so revocation and role changes take effect immediately; the token only proves identity. A `permissions` claim is not implemented yet; roles are the only gate.
 
 **Roles:**
 - `owner` — Network creator. Can: manage users, settings, billing, monetization.
@@ -245,13 +245,14 @@ Accounts with no network (viewers) can create one later via `POST /api/networks/
 |----------|--------|---------|------|--------|
 | `POST /api/networks/create` | POST | Create a network for an account that has none | JWT | ✓ Built |
 | `GET /api/networks/{network_id}` | GET | Get network metadata, api keys (masked) | JWT (admin+) | ✓ Built |
-| `PUT /api/networks/{network_id}/settings` | PUT | Update network name, description, branding | JWT (admin+) | Next |
-| `GET /api/networks/{network_id}/users` | GET | List network users with roles | JWT (admin+) | Next |
-| `POST /api/networks/{network_id}/users` | POST | Invite user to network | JWT (owner) | Next |
-| `PUT /api/networks/{network_id}/users/{user_id}` | PUT | Change user role or revoke access | JWT (owner) | Next |
-| `POST /api/networks/{network_id}/webhooks` | POST | Register webhook | JWT (admin+) | Planned |
-| `GET /api/networks/{network_id}/webhooks` | GET | List webhooks | JWT (admin+) | Planned |
-| `DELETE /api/networks/{network_id}/webhooks/{webhook_id}` | DELETE | Delete webhook | JWT (admin+) | Planned |
+| `PUT /api/networks/{network_id}/settings` | PUT | Update network name, description, branding | JWT (admin+) | ✓ Built |
+| `GET /api/networks/{network_id}/users` | GET | List network users + pending invites | JWT (admin+) | ✓ Built |
+| `POST /api/networks/{network_id}/users` | POST | Create invite; returns a 24h onboarding link (no email sent) | JWT (owner) | ✓ Built |
+| `PUT /api/networks/{network_id}/users/{user_id}` | PUT | Change user role or revoke access | JWT (owner) | ✓ Built |
+| `POST /api/auth/accept-invite` | POST | Redeem an onboarding link, create the account | Public | ✓ Built |
+| `POST /api/networks/{network_id}/webhooks` | POST | Register webhook (secret shown once) | JWT (admin+) | ✓ Built (no delivery/signing yet) |
+| `GET /api/networks/{network_id}/webhooks` | GET | List webhooks | JWT (admin+) | ✓ Built |
+| `DELETE /api/networks/{network_id}/webhooks/{webhook_id}` | DELETE | Delete webhook | JWT (admin+) | ✓ Built |
 
 **Modified endpoints:**
 - All existing `/api/creator/*` endpoints enforce `network_id` in middleware and queries
@@ -309,7 +310,7 @@ Tokens issued before this change are rejected once; users log in again.
 | Week | Work |
 |------|------|
 | 1–2 | Network provisioning, JWT/RBAC enforcement, query scoping, isolation tests ✓ |
-| 3–4 | User management + settings endpoints, audit remaining endpoints, token rotation |
+| 3–4 | User management, invites, settings, webhook registration ✓; remaining: audit endpoints, token rotation |
 | 5–6 | Stripe Express provisioning, webhook handling, API key validation/rate limits |
 | 7–8 | Stream tables are already created; populate/verify data structures (no endpoints yet) |
 | 9–10 | Dashboard UI: network selector, user management, settings pages |
@@ -323,7 +324,7 @@ Tokens issued before this change are rejected once; users log in again.
 - ☑ RBAC enforced on creator routes: guests are blocked, other networks' episodes are invisible
 - ☐ Each network's Stripe account receives correct payouts minus platform fee
 - ☐ API keys generate ✓, but validation and rate limiting are not built
-- ☐ Webhooks signed and routed to correct network handler
+- ☐ Webhooks signed and routed to correct network handler (registration ✓; delivery, HMAC signing and retries not built)
 - ☑ Live streaming tables exist, schema supports guest RTMP ingest + recording storage
 - ☐ Backward compatible: Phase 1 endpoints work, but existing sessions must re-login once
 
@@ -596,7 +597,9 @@ Longest sequential dependency chain (blocks completion date):
 
 ## Next Immediate Action (Phase 2, Week 3–4)
 
-**Priority 4: User Management & Settings Endpoints**
+**Priority 4: User Management & Settings Endpoints — ✓ built (invites are onboarding links; email sending is Phase 3+)**
+
+Next: Priority 5 — Stripe Express provisioning, API key validation + rate limiting, webhook delivery.
 
 Now that network provisioning and RBAC are working, build the management endpoints:
 

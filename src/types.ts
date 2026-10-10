@@ -5,6 +5,8 @@ export interface Env {
   ENVIRONMENT: string;
   JWT_SECRET: string;
   CORS_ORIGINS?: string;
+  /** Base URL of the dashboard, used to build invite links. */
+  DASHBOARD_URL?: string;
   STRIPE_SECRET_KEY: string;
   STRIPE_WEBHOOK_SECRET: string; // platform events endpoint
   STRIPE_CONNECT_WEBHOOK_SECRET: string; // connected-account events endpoint
