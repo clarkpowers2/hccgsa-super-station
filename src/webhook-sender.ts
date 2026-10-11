@@ -75,6 +75,12 @@ async function attemptDelivery(env: Env, row: DueRow): Promise<void> {
     if (!row.secret_ciphertext) throw new Error("no secret");
     const secret = await decryptSecret(env, row.secret_ciphertext);
     const signature = await signPayload(secret, row.payload);
+    // Known limit (DNS rebinding): validWebhookUrl (networks.ts) checks the hostname string at registration only.
+    // We do not resolve DNS here and Workers cannot pin the connection to a vetted IP, so a public-looking
+    // hostname that later resolves to a private or internal address is not caught. Mitigations in place:
+    // https only, no IP literals or local-style names, no credentials in the URL, redirects not followed,
+    // a 10s timeout, and no response body ever read or stored. Closing the gap needs an egress proxy or a
+    // DNS-over-HTTPS resolve-and-check step; that is an open decision, not a tested guarantee.
     // redirect: "manual" means a 3xx is a failure, so the request is never followed to another host.
     const res = await fetch(row.url, {
       method: "POST",

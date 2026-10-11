@@ -101,13 +101,34 @@ describe("delivery", () => {
     const a = await owner(env, "f@example.com");
     await register(env, a, "https://hooks.example.com/pub", ["episode.published"]);
     const f = okFetch();
+    const count = async () => (await one<{ n: number }>(env, "SELECT COUNT(*) AS n FROM webhook_deliveries"))!.n;
+
+    // A create event must not reach a subscriber that only asked for episode.published.
     const ep = await call(env, "POST", "/api/creator/episodes", { token: a.token, body: { title: "Filter" } });
-    await call(env, "PUT", `/api/creator/episodes/${ep.json.id}`, { token: a.token, body: { isPublished: true } });
-    // Publishing needs media; the transition check is what matters, so the write may 409 without an upload.
-    await deliverDueWebhooks(env);
-    const events = (await all<{ event_type: string }>(env, "SELECT event_type FROM webhook_deliveries")).map((r) => r.event_type);
-    expect(events.every((e) => e === "episode.published")).toBe(true);
-    expect(f.mock.calls.length).toBe(events.length);
+    expect(ep.status).toBe(201);
+    expect(await count()).toBe(0);
+
+    // Publishing requires media. Give the episode a media key directly so the publish is accepted.
+    await run(env, "UPDATE episodes SET video_key = 'test/video.mp4' WHERE id = ?", ep.json.id);
+
+    const publish = await call(env, "PUT", `/api/creator/episodes/${ep.json.id}`, { token: a.token, body: { isPublished: true } });
+    expect(publish.status).toBe(200);
+    expect(publish.json.isPublished).toBe(true);
+
+    // Exactly one episode.published delivery on the unpublished -> published transition.
+    const rows = await all<{ event_type: string; payload: string }>(env, "SELECT event_type, payload FROM webhook_deliveries");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.event_type).toBe("episode.published");
+    expect(JSON.parse(rows[0]!.payload)).toMatchObject({ id: ep.json.id, isPublished: true });
+
+    // Re-publishing an already-published episode, or editing it, creates nothing.
+    const again = await call(env, "PUT", `/api/creator/episodes/${ep.json.id}`, { token: a.token, body: { isPublished: true } });
+    expect(again.status).toBe(200);
+    expect(await count()).toBe(1);
+
+    expect(await deliverDueWebhooks(env)).toBe(1);
+    expect(f).toHaveBeenCalledTimes(1);
+    expect((f.mock.calls[0]![1] as any).headers["X-Webhook-Event"]).toBe("episode.published");
   });
 
   it("network isolation: network A's episode events never create deliveries for network B", async () => {
