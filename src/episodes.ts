@@ -3,6 +3,7 @@ import type { Context } from "hono";
 import type { AppBindings } from "./types";
 import { requireAuth, requireCreator, requireNetwork, requireRole } from "./auth";
 import { enqueueTranscript } from "./pipeline";
+import { enqueueWebhookEventSafe } from "./webhook-sender";
 import {
   MEDIA_POLICY,
   UPLOAD_URL_TTL_SECONDS,
@@ -169,6 +170,12 @@ creator.post("/episodes", async (c) => {
     .bind(id, c.get("user").sub, c.get("user").networkId, body.title.trim(), (body.description as string | undefined) ?? null, JSON.stringify(tags), price)
     .run();
   const row = (await findOwned(c, id))!;
+  await enqueueWebhookEventSafe(c.env, {
+    networkId: row.network_id,
+    eventType: "episode.created",
+    eventId: crypto.randomUUID(),
+    payload: { id: row.id, title: row.title, isPublished: row.is_published === 1, publishDate: row.publish_date },
+  });
   return c.json(await shape(c.env, row), 201);
 });
 
@@ -239,7 +246,17 @@ creator.put("/episodes/:id", async (c) => {
   await c.env.DB.prepare(`UPDATE episodes SET ${sets.join(", ")}, updated_at = datetime('now') WHERE id = ? AND creator_id = ? AND network_id = ?`)
     .bind(...vals, row.id, row.creator_id, row.network_id)
     .run();
-  return c.json(await shape(c.env, (await findOwned(c, row.id))!));
+  const updated = (await findOwned(c, row.id))!;
+  // Fire only on the transition to published, not on every edit of a published episode.
+  if (body.isPublished === true && row.is_published === 0) {
+    await enqueueWebhookEventSafe(c.env, {
+      networkId: updated.network_id,
+      eventType: "episode.published",
+      eventId: crypto.randomUUID(),
+      payload: { id: updated.id, title: updated.title, isPublished: true, publishDate: updated.publish_date },
+    });
+  }
+  return c.json(await shape(c.env, updated));
 });
 
 // ---- uploads -------------------------------------------------------------

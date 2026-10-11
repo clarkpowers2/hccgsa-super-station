@@ -18,6 +18,7 @@ export interface Env {
   R2_ACCESS_KEY_ID: string;
   R2_SECRET_ACCESS_KEY: string;
   R2_BUCKET_NAME: string;
+  WEBHOOK_ENC_KEY: string; // base64, 32 bytes; encrypts webhook secrets at rest
 }
 
 export type Role = "owner" | "admin" | "creator" | "guest";

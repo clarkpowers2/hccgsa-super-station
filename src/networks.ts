@@ -3,6 +3,7 @@ import type { Context } from "hono";
 import type { AppBindings, Role } from "./types";
 import { issueToken, requireAuth, requireNetwork, requireRole } from "./auth";
 import { provisionNetwork, randomHex, sha256Hex } from "./provision";
+import { encryptSecret } from "./webhook-crypto";
 
 type Ctx = Context<AppBindings>;
 
@@ -166,7 +167,7 @@ networks.put("/:networkId/users/:userId", ...ownerOnly, async (c) => {
   return c.json({ id: target.id, role: body.role });
 });
 
-// ---- webhooks (registration only; delivery + HMAC signing are Phase 3+) -------------
+// ---- webhooks: registration here; delivery + HMAC signing in src/webhook-sender.ts ----
 
 function validWebhookUrl(v: unknown): string | null {
   if (typeof v !== "string" || v.length > 500) return null;
@@ -174,7 +175,7 @@ function validWebhookUrl(v: unknown): string | null {
     const u = new URL(v);
     const h = u.hostname;
     if (u.protocol !== "https:" || u.username || u.password) return null;
-    if (h === "localhost" || h.endsWith(".local") || h.endsWith(".internal") || /^[\d.]+$/.test(h) || h.includes(":")) return null; // no IP literals / local names
+    if (!h.includes(".") || h.endsWith(".localhost") || h.endsWith(".local") || h.endsWith(".internal") || /^[\d.]+$/.test(h) || h.includes(":")) return null; // no IP literals / local names
     return u.toString();
   } catch {
     return null;
@@ -198,8 +199,10 @@ networks.post("/:networkId/webhooks", ...adminUp, async (c) => {
   const id = crypto.randomUUID();
   const secret = `whsec_${randomHex(24)}`;
   const events = [...new Set(body.events as string[])];
-  await c.env.DB.prepare("INSERT INTO webhooks (id, network_id, url, events, secret, created_by) VALUES (?, ?, ?, ?, ?, ?)")
-    .bind(id, nid, url, JSON.stringify(events), secret, c.get("user").sub)
+  await c.env.DB.prepare(
+    "INSERT INTO webhooks (id, network_id, url, events, secret_ciphertext, status, created_by) VALUES (?, ?, ?, ?, ?, 'active', ?)",
+  )
+    .bind(id, nid, url, JSON.stringify(events), await encryptSecret(c.env, secret), c.get("user").sub)
     .run();
   return c.json({ id, url, events, secret }, 201); // the secret is only ever returned here
 });

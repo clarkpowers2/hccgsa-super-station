@@ -5,6 +5,7 @@ import { creator } from "./episodes";
 import { billing } from "./billing";
 import { creatorBilling } from "./creator-billing";
 import { webhooks } from "./webhooks";
+import { deliverDueWebhooks } from "./webhook-sender";
 import { StripeError } from "./stripe";
 import { processNextTranscript } from "./pipeline";
 import type { Env } from "./types";
@@ -64,6 +65,7 @@ export default {
   // Cron (every minute, see wrangler.toml): work through the transcription queue, one episode per tick.
   async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext) {
     ctx.waitUntil(processNextTranscript(env).catch((e) => console.error("transcript tick failed", e instanceof Error ? e.constructor.name : "unknown")));
+    ctx.waitUntil(deliverDueWebhooks(env).catch((e) => console.error("webhook tick failed", e instanceof Error ? e.constructor.name : "unknown")));
   },
 };
 export { app };
