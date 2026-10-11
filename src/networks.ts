@@ -219,6 +219,12 @@ networks.delete("/:networkId/webhooks/:webhookId", ...adminUp, async (c) => {
     .bind(c.req.param("webhookId"), c.get("user").networkId)
     .first();
   if (!row) return c.json({ error: "not found" }, 404);
-  await c.env.DB.prepare("DELETE FROM webhooks WHERE id = ? AND network_id = ?").bind(c.req.param("webhookId"), c.get("user").networkId).run();
+  // Deliveries reference the webhook (FK), so they go first, in the same atomic batch.
+  const nid = c.get("user").networkId;
+  const wid = c.req.param("webhookId");
+  await c.env.DB.batch([
+    c.env.DB.prepare("DELETE FROM webhook_deliveries WHERE webhook_id = ? AND network_id = ?").bind(wid, nid),
+    c.env.DB.prepare("DELETE FROM webhooks WHERE id = ? AND network_id = ?").bind(wid, nid),
+  ]);
   return c.json({ ok: true });
 });

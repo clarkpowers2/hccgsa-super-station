@@ -190,4 +190,32 @@ describe("delivery", () => {
     expect(logs.join("\n")).not.toContain(hook.secret);
     expect(logs.join("\n")).not.toContain("hooks.example.com");
   });
+
+  it("deletes a webhook that already has delivery rows, and removes those rows with it", async () => {
+    const { env } = makeEnv();
+    const a = await owner(env, "del@example.com");
+    const hook = await register(env, a, "https://hooks.example.com/in", ["episode.created"]);
+    okFetch();
+    await call(env, "POST", "/api/creator/episodes", { token: a.token, body: { title: "Before delete" } });
+    expect((await one<{ n: number }>(env, "SELECT COUNT(*) AS n FROM webhook_deliveries"))!.n).toBe(1);
+
+    const del = await call(env, "DELETE", `/api/networks/${a.nid}/webhooks/${hook.id}`, { token: a.token });
+    expect(del.status).toBe(200);
+    expect((await one<{ n: number }>(env, "SELECT COUNT(*) AS n FROM webhooks WHERE id = ?", hook.id))!.n).toBe(0);
+    expect((await one<{ n: number }>(env, "SELECT COUNT(*) AS n FROM webhook_deliveries WHERE webhook_id = ?", hook.id))!.n).toBe(0);
+  });
+
+  it("another network cannot delete a webhook, and its deliveries survive the attempt", async () => {
+    const { env } = makeEnv();
+    const a = await owner(env, "keep-a@example.com");
+    const b = await owner(env, "keep-b@example.com");
+    const hook = await register(env, a, "https://hooks.example.com/in", ["episode.created"]);
+    okFetch();
+    await call(env, "POST", "/api/creator/episodes", { token: a.token, body: { title: "Keep me" } });
+
+    const attempt = await call(env, "DELETE", `/api/networks/${b.nid}/webhooks/${hook.id}`, { token: b.token });
+    expect(attempt.status).toBe(404);
+    expect((await one<{ n: number }>(env, "SELECT COUNT(*) AS n FROM webhook_deliveries WHERE webhook_id = ?", hook.id))!.n).toBe(1);
+    expect((await one<{ n: number }>(env, "SELECT COUNT(*) AS n FROM webhooks WHERE id = ?", hook.id))!.n).toBe(1);
+  });
 });
