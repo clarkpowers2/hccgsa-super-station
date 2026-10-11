@@ -1,5 +1,5 @@
 import { createRequire } from "node:module";
-import { readFileSync, readdirSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import type { DatabaseSync as DatabaseSyncType } from "node:sqlite";
 import { app } from "../src/index";
 import type { Env } from "../src/types";
@@ -26,12 +26,32 @@ class FakeStatement {
     this.db.prepare(this.sql).run(...(this.params as any[]));
     return { success: true };
   }
+  /** Used by FakeD1.batch so statements run inside one transaction. */
+  runSync() {
+    this.db.prepare(this.sql).run(...(this.params as any[]));
+  }
 }
 
 export function fakeD1(): D1Database {
   const db = new DatabaseSync(":memory:");
-  for (const f of readdirSync("migrations").sort()) db.exec(readFileSync(`migrations/${f}`, "utf8"));
-  return { prepare: (sql: string) => new FakeStatement(db, sql) } as unknown as D1Database;
+  for (const f of readdirSync("migrations").filter((n) => n.endsWith(".sql")).sort()) {
+    db.exec(readFileSync(`migrations/${f}`, "utf8"));
+  }
+  return {
+    prepare: (sql: string) => new FakeStatement(db, sql),
+    // D1 batches are atomic; mirror that with a transaction.
+    batch: async (stmts: FakeStatement[]) => {
+      db.exec("BEGIN");
+      try {
+        for (const s of stmts) s.runSync();
+        db.exec("COMMIT");
+      } catch (e) {
+        db.exec("ROLLBACK");
+        throw e;
+      }
+      return stmts.map(() => ({ success: true }));
+    },
+  } as unknown as D1Database;
 }
 
 export interface FakeObject {
@@ -68,6 +88,8 @@ export function makeEnv(overrides: Partial<Env> = {}) {
     STRIPE_WEBHOOK_SECRET: "test-platform-webhook-secret",
     STRIPE_CONNECT_WEBHOOK_SECRET: "test-connect-webhook-secret",
     APP_URL: "https://app.test",
+    // Generated per test run; never a real key.
+    WEBHOOK_ENC_KEY: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64"),
     ...overrides,
   } as unknown as Env;
   return { env, objects: r2.objects };

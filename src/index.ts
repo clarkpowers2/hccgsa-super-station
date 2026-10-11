@@ -1,16 +1,32 @@
 import { Hono } from "hono";
+import { cors } from "hono/cors";
 import { auth } from "./auth";
 import { creator } from "./episodes";
 import { billing } from "./billing";
 import { creatorBilling } from "./creator-billing";
 import { webhooks } from "./webhooks";
+import { deliverDueWebhooks } from "./webhook-sender";
 import { StripeError } from "./stripe";
 import { processNextTranscript } from "./pipeline";
 import type { Env } from "./types";
 import { signedViewUrl } from "./media";
+import { publicApi, publishedEpisodeView } from "./public";
+import { networks } from "./networks";
 import type { AppBindings } from "./types";
 
 const app = new Hono<AppBindings>();
+
+// Browser dashboard origins; override with a comma-separated CORS_ORIGINS var.
+const dashboardCors = cors({
+  origin: (origin, c) => {
+    const allowed = (c.env.CORS_ORIGINS ?? "http://localhost:3000").split(",").map((o: string) => o.trim());
+    return allowed.includes(origin) ? origin : null;
+  },
+  allowHeaders: ["Authorization", "Content-Type"],
+  allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+});
+// /api/public/* sets its own open CORS (bearer-key auth, no cookies).
+app.use("/api/*", (c, next) => (c.req.path.startsWith("/api/public/") ? next() : dashboardCors(c, next)));
 
 app.get("/api/health", (c) => c.json({ status: "ok", environment: c.env.ENVIRONMENT }));
 app.route("/api/auth", auth);
@@ -18,6 +34,8 @@ app.route("/api/creator", creator);
 app.route("/api/creator", creatorBilling);
 app.route("/api", billing);
 app.route("/api/webhooks", webhooks);
+app.route("/api/networks", networks);
+app.route("/api/public", publicApi);
 
 app.get("/api/episodes", async (c) => {
   const { results } = await c.env.DB.prepare(
@@ -29,30 +47,8 @@ app.get("/api/episodes", async (c) => {
 });
 
 app.get("/api/episodes/:id", async (c) => {
-  const r = await c.env.DB.prepare(
-    `SELECT e.id, e.title, e.description, e.thumbnail_key, e.metadata_tags, e.publish_date, e.one_time_price_cents,
-            e.view_count, e.summary, e.ai_tags, e.key_quotes, (e.transcript_text IS NOT NULL) AS has_transcript, u.creator_name
-     FROM episodes e JOIN users u ON u.id = e.creator_id
-     WHERE e.id = ? AND e.is_published = 1`,
-  )
-    .bind(c.req.param("id"))
-    .first<Record<string, any>>();
-  if (!r) return c.json({ error: "not found" }, 404);
-  return c.json({
-    id: r.id,
-    title: r.title,
-    description: r.description,
-    tags: r.metadata_tags ? JSON.parse(r.metadata_tags) : [],
-    summary: r.summary ?? null,
-    aiTags: r.ai_tags ? JSON.parse(r.ai_tags) : [],
-    keyQuotes: r.key_quotes ? JSON.parse(r.key_quotes) : [],
-    hasTranscript: r.has_transcript === 1, // the text itself is gated: GET /api/episodes/:id/transcript
-    publishDate: r.publish_date,
-    oneTimePriceCents: r.one_time_price_cents,
-    viewCount: r.view_count,
-    creatorName: r.creator_name,
-    thumbnailUrl: r.thumbnail_key ? await signedViewUrl(c.env, r.thumbnail_key) : null,
-  });
+  const ep = await publishedEpisodeView(c.env, c.req.param("id"));
+  return ep ? c.json(ep) : c.json({ error: "not found" }, 404);
 });
 
 app.onError((err, c) => {
@@ -69,6 +65,7 @@ export default {
   // Cron (every minute, see wrangler.toml): work through the transcription queue, one episode per tick.
   async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext) {
     ctx.waitUntil(processNextTranscript(env).catch((e) => console.error("transcript tick failed", e instanceof Error ? e.constructor.name : "unknown")));
+    ctx.waitUntil(deliverDueWebhooks(env).catch((e) => console.error("webhook tick failed", e instanceof Error ? e.constructor.name : "unknown")));
   },
 };
 export { app };

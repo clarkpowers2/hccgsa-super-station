@@ -1,15 +1,18 @@
 import { Hono } from "hono";
 import { sign, verify } from "hono/jwt";
 import type { MiddlewareHandler } from "hono";
-import type { AppBindings, Env } from "./types";
+import type { AppBindings, Env, Role } from "./types";
 import { hashPassword, verifyPassword } from "./password";
+import { provisionNetwork, sha256Hex, type ProvisionedNetwork } from "./provision";
 
 const ACCESS_TTL_SECONDS = 60 * 60 * 24; // 24h
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-async function issueToken(env: Env, userId: string, isCreator: boolean) {
+const ROLES: readonly string[] = ["owner", "admin", "creator", "guest"];
+
+export async function issueToken(env: Env, u: { id: string; isCreator: boolean; networkId: string | null; role: Role }) {
   const exp = Math.floor(Date.now() / 1000) + ACCESS_TTL_SECONDS;
-  return sign({ sub: userId, isCreator, exp }, env.JWT_SECRET);
+  return sign({ sub: u.id, isCreator: u.isCreator, network_id: u.networkId, role: u.role, exp }, env.JWT_SECRET);
 }
 
 export const requireAuth: MiddlewareHandler<AppBindings> = async (c, next) => {
@@ -18,7 +21,15 @@ export const requireAuth: MiddlewareHandler<AppBindings> = async (c, next) => {
   if (!token) return c.json({ error: "unauthorized" }, 401);
   try {
     const p = await verify(token, c.env.JWT_SECRET, "HS256");
-    c.set("user", { sub: String(p.sub), isCreator: p.isCreator === true });
+    // Tokens minted before multi-network (no role/network_id claims) are rejected: re-login.
+    if (typeof p.role !== "string" || !ROLES.includes(p.role) || !("network_id" in p)) throw new Error("stale token");
+    // The token proves identity; the user row is authoritative for membership, so revoked
+    // users and role changes take effect on the very next request.
+    const row = await c.env.DB.prepare("SELECT network_id, role, is_creator, deleted_at FROM users WHERE id = ?")
+      .bind(String(p.sub))
+      .first<{ network_id: string | null; role: Role; is_creator: number; deleted_at: string | null }>();
+    if (!row || row.deleted_at) throw new Error("revoked");
+    c.set("user", { sub: String(p.sub), isCreator: row.is_creator === 1, networkId: row.network_id, role: row.role });
   } catch {
     return c.json({ error: "unauthorized" }, 401);
   }
@@ -27,6 +38,17 @@ export const requireAuth: MiddlewareHandler<AppBindings> = async (c, next) => {
 
 export const requireCreator: MiddlewareHandler<AppBindings> = async (c, next) => {
   if (!c.get("user").isCreator) return c.json({ error: "creator account required" }, 403);
+  await next();
+};
+
+/** Requires the caller to belong to a network. Handlers read it via c.get("user").networkId. */
+export const requireNetwork: MiddlewareHandler<AppBindings> = async (c, next) => {
+  if (!c.get("user").networkId) return c.json({ error: "network membership required" }, 403);
+  await next();
+};
+
+export const requireRole = (...roles: Role[]): MiddlewareHandler<AppBindings> => async (c, next) => {
+  if (!roles.includes(c.get("user").role)) return c.json({ error: "insufficient role" }, 403);
   await next();
 };
 
@@ -46,17 +68,29 @@ async function register(c: any, isCreator: boolean) {
   if (!name) return c.json({ error: "creatorName required" }, 400);
 
   const id = crypto.randomUUID();
+  const insertUser = c.env.DB.prepare(
+    "INSERT INTO users (id, email, password_hash, creator_name, is_creator, role) VALUES (?, ?, ?, ?, ?, ?)",
+  ).bind(id, email, await hashPassword(password), name, isCreator ? 1 : 0, isCreator ? "owner" : "guest");
+
+  // Every creator signup provisions their own network in the same atomic batch.
+  let network: ProvisionedNetwork | null = null;
   try {
-    await c.env.DB.prepare(
-      "INSERT INTO users (id, email, password_hash, creator_name, is_creator) VALUES (?, ?, ?, ?, ?)",
-    )
-      .bind(id, email, await hashPassword(password), name, isCreator ? 1 : 0)
-      .run();
+    if (isCreator) {
+      network = await provisionNetwork(c.env, id, name, insertUser);
+    } else {
+      await insertUser.run();
+    }
   } catch (e) {
-    if (String(e).includes("UNIQUE")) return c.json({ error: "email already registered" }, 409);
+    if (String(e).includes("users.email")) return c.json({ error: "email already registered" }, 409);
     throw e;
   }
-  return c.json({ id, token: await issueToken(c.env, id, isCreator) }, 201);
+  const token = await issueToken(c.env, {
+    id,
+    isCreator,
+    networkId: network?.id ?? null,
+    role: isCreator ? "owner" : "guest",
+  });
+  return c.json({ id, token, ...(network ? { network } : {}) }, 201);
 }
 
 export const auth = new Hono<AppBindings>();
@@ -67,20 +101,60 @@ auth.post("/creator-register", (c) => register(c, true));
 auth.post("/login", async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as RegisterBody;
   const email = body.email?.trim().toLowerCase() ?? "";
-  const row = await c.env.DB.prepare("SELECT id, password_hash, is_creator FROM users WHERE email = ?")
+  const row = await c.env.DB.prepare(
+    "SELECT id, password_hash, is_creator, network_id, role FROM users WHERE email = ? AND deleted_at IS NULL",
+  )
     .bind(email)
-    .first<{ id: string; password_hash: string; is_creator: number }>();
+    .first<{ id: string; password_hash: string; is_creator: number; network_id: string | null; role: Role }>();
   // Same error for unknown email and bad password to avoid account enumeration.
   if (!row || !(await verifyPassword(body.password ?? "", row.password_hash))) {
     return c.json({ error: "invalid credentials" }, 401);
   }
-  return c.json({ token: await issueToken(c.env, row.id, row.is_creator === 1) });
+  return c.json({ token: await issueToken(c.env, { id: row.id, isCreator: row.is_creator === 1, networkId: row.network_id, role: row.role }) });
 });
 
 // Tokens are stateless; the client discards its token on logout.
 auth.post("/logout", (c) => c.json({ ok: true }));
 
 auth.post("/refresh-token", requireAuth, async (c) => {
-  const u = c.get("user");
-  return c.json({ token: await issueToken(c.env, u.sub, u.isCreator) });
+  // Re-read membership so role/network changes take effect on refresh.
+  const row = await c.env.DB.prepare("SELECT id, is_creator, network_id, role FROM users WHERE id = ? AND deleted_at IS NULL")
+    .bind(c.get("user").sub)
+    .first<{ id: string; is_creator: number; network_id: string | null; role: Role }>();
+  if (!row) return c.json({ error: "unauthorized" }, 401);
+  return c.json({ token: await issueToken(c.env, { id: row.id, isCreator: row.is_creator === 1, networkId: row.network_id, role: row.role }) });
+});
+
+// Public: redeem an onboarding link from POST /api/networks/:id/users.
+auth.post("/accept-invite", async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) as { token?: string; password?: string; creatorName?: string };
+  const password = body.password ?? "";
+  const name = body.creatorName?.trim() ?? "";
+  if (typeof body.token !== "string" || !body.token) return c.json({ error: "token required" }, 400);
+  if (password.length < 10) return c.json({ error: "password must be at least 10 characters" }, 400);
+  if (!name) return c.json({ error: "creatorName required" }, 400);
+
+  const invite = await c.env.DB.prepare(
+    "SELECT id, network_id, email, role FROM invites WHERE token_hash = ? AND accepted_at IS NULL AND expires_at > datetime('now')",
+  )
+    .bind(await sha256Hex(body.token))
+    .first<{ id: string; network_id: string; email: string; role: Role }>();
+  if (!invite) return c.json({ error: "invite is invalid or expired" }, 410);
+
+  const id = crypto.randomUUID();
+  const isCreator = invite.role !== "guest";
+  try {
+    // One batch: the invite can only be consumed together with the user insert.
+    await c.env.DB.batch([
+      c.env.DB.prepare("UPDATE invites SET accepted_at = datetime('now') WHERE id = ? AND accepted_at IS NULL").bind(invite.id),
+      c.env.DB.prepare(
+        "INSERT INTO users (id, email, password_hash, creator_name, is_creator, network_id, role) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      ).bind(id, invite.email, await hashPassword(password), name, isCreator ? 1 : 0, invite.network_id, invite.role),
+    ]);
+  } catch (e) {
+    if (String(e).includes("users.email")) return c.json({ error: "email already registered" }, 409);
+    throw e;
+  }
+  const token = await issueToken(c.env, { id, isCreator, networkId: invite.network_id, role: invite.role });
+  return c.json({ id, token, networkId: invite.network_id, role: invite.role }, 201);
 });

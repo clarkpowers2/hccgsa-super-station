@@ -1,8 +1,9 @@
 import { Hono } from "hono";
 import type { Context } from "hono";
 import type { AppBindings } from "./types";
-import { requireAuth, requireCreator } from "./auth";
+import { requireAuth, requireCreator, requireNetwork, requireRole } from "./auth";
 import { enqueueTranscript } from "./pipeline";
+import { enqueueWebhookEventSafe } from "./webhook-sender";
 import {
   MEDIA_POLICY,
   UPLOAD_URL_TTL_SECONDS,
@@ -19,6 +20,7 @@ type Ctx = Context<AppBindings>;
 interface EpisodeRow {
   id: string;
   creator_id: string;
+  network_id: string;
   title: string;
   description: string | null;
   thumbnail_key: string | null;
@@ -68,8 +70,9 @@ async function shape(env: AppBindings["Bindings"], r: EpisodeRow) {
 }
 
 async function findOwned(c: Ctx, episodeId: string) {
-  return c.env.DB.prepare("SELECT * FROM episodes WHERE id = ? AND creator_id = ?")
-    .bind(episodeId, c.get("user").sub)
+  const u = c.get("user");
+  return c.env.DB.prepare("SELECT * FROM episodes WHERE id = ? AND creator_id = ? AND network_id = ?")
+    .bind(episodeId, u.sub, u.networkId)
     .first<EpisodeRow>();
 }
 
@@ -90,7 +93,7 @@ function parsePrice(v: unknown): number | null | undefined {
 }
 
 export const creator = new Hono<AppBindings>();
-creator.use("*", requireAuth, requireCreator);
+creator.use("*", requireAuth, requireCreator, requireNetwork, requireRole("owner", "admin", "creator"));
 
 // ---- profile -------------------------------------------------------------
 
@@ -162,11 +165,17 @@ creator.post("/episodes", async (c) => {
 
   const id = crypto.randomUUID();
   await c.env.DB.prepare(
-    "INSERT INTO episodes (id, creator_id, title, description, metadata_tags, one_time_price_cents, transcript_status) VALUES (?, ?, ?, ?, ?, ?, 'none')",
+    "INSERT INTO episodes (id, creator_id, network_id, title, description, metadata_tags, one_time_price_cents, transcript_status) VALUES (?, ?, ?, ?, ?, ?, ?, 'none')",
   )
-    .bind(id, c.get("user").sub, body.title.trim(), (body.description as string | undefined) ?? null, JSON.stringify(tags), price)
+    .bind(id, c.get("user").sub, c.get("user").networkId, body.title.trim(), (body.description as string | undefined) ?? null, JSON.stringify(tags), price)
     .run();
   const row = (await findOwned(c, id))!;
+  await enqueueWebhookEventSafe(c.env, {
+    networkId: row.network_id,
+    eventType: "episode.created",
+    eventId: crypto.randomUUID(),
+    payload: { id: row.id, title: row.title, isPublished: row.is_published === 1, publishDate: row.publish_date },
+  });
   return c.json(await shape(c.env, row), 201);
 });
 
@@ -177,10 +186,10 @@ creator.get("/episodes", async (c) => {
   if (published !== undefined && published !== "true" && published !== "false")
     return c.json({ error: "published must be true or false" }, 400);
   const filter = published === undefined ? "" : " AND is_published = ?";
-  const params: unknown[] = [c.get("user").sub];
+  const params: unknown[] = [c.get("user").sub, c.get("user").networkId];
   if (published !== undefined) params.push(published === "true" ? 1 : 0);
   const { results } = await c.env.DB.prepare(
-    `SELECT * FROM episodes WHERE creator_id = ?${filter} ORDER BY created_at DESC, id LIMIT ? OFFSET ?`,
+    `SELECT * FROM episodes WHERE creator_id = ? AND network_id = ?${filter} ORDER BY created_at DESC, id LIMIT ? OFFSET ?`,
   )
     .bind(...params, limit, offset)
     .all<EpisodeRow>();
@@ -234,10 +243,20 @@ creator.put("/episodes/:id", async (c) => {
   }
   if (!sets.length) return c.json({ error: "nothing to update" }, 400);
 
-  await c.env.DB.prepare(`UPDATE episodes SET ${sets.join(", ")}, updated_at = datetime('now') WHERE id = ? AND creator_id = ?`)
-    .bind(...vals, row.id, row.creator_id)
+  await c.env.DB.prepare(`UPDATE episodes SET ${sets.join(", ")}, updated_at = datetime('now') WHERE id = ? AND creator_id = ? AND network_id = ?`)
+    .bind(...vals, row.id, row.creator_id, row.network_id)
     .run();
-  return c.json(await shape(c.env, (await findOwned(c, row.id))!));
+  const updated = (await findOwned(c, row.id))!;
+  // Fire only on the transition to published, not on every edit of a published episode.
+  if (body.isPublished === true && row.is_published === 0) {
+    await enqueueWebhookEventSafe(c.env, {
+      networkId: updated.network_id,
+      eventType: "episode.published",
+      eventId: crypto.randomUUID(),
+      payload: { id: updated.id, title: updated.title, isPublished: true, publishDate: updated.publish_date },
+    });
+  }
+  return c.json(await shape(c.env, updated));
 });
 
 // ---- uploads -------------------------------------------------------------
@@ -257,7 +276,7 @@ creator.post("/episodes/:id/uploads", async (c) => {
     return c.json({ error: "sizeBytes must be a positive integer" }, 400);
   if (body.sizeBytes > policy.maxBytes) return c.json({ error: "file too large", maxBytes: policy.maxBytes }, 413);
 
-  const key = `${keyPrefix(row.creator_id, row.id, body.kind)}${crypto.randomUUID()}.${policy.types[body.contentType]}`;
+  const key = `${keyPrefix(row.network_id, row.creator_id, row.id, body.kind)}${crypto.randomUUID()}.${policy.types[body.contentType]}`;
   const uploadUrl = await signedUploadUrl(c.env, key, body.contentType);
   return c.json({
     key,
@@ -278,7 +297,7 @@ creator.post("/episodes/:id/uploads/complete", async (c) => {
   if (!isMediaKind(body.kind)) return c.json({ error: "kind must be video, audio or thumbnail" }, 400);
   const kind: MediaKind = body.kind;
   const policy = MEDIA_POLICY[kind];
-  if (typeof body.key !== "string" || !body.key.startsWith(keyPrefix(row.creator_id, row.id, kind)) || body.key.includes(".."))
+  if (typeof body.key !== "string" || !body.key.startsWith(keyPrefix(row.network_id, row.creator_id, row.id, kind)) || body.key.includes(".."))
     return c.json({ error: "key does not belong to this episode" }, 400);
 
   const obj = await c.env.MEDIA.head(body.key);
@@ -291,8 +310,8 @@ creator.post("/episodes/:id/uploads/complete", async (c) => {
   }
 
   const previous = row[policy.column];
-  await c.env.DB.prepare(`UPDATE episodes SET ${policy.column} = ?, updated_at = datetime('now') WHERE id = ? AND creator_id = ?`)
-    .bind(body.key, row.id, row.creator_id)
+  await c.env.DB.prepare(`UPDATE episodes SET ${policy.column} = ?, updated_at = datetime('now') WHERE id = ? AND creator_id = ? AND network_id = ?`)
+    .bind(body.key, row.id, row.creator_id, row.network_id)
     .run();
   if (kind === "audio") await enqueueTranscript(c.env, row.id); // new audio -> fresh transcript
   if (previous && previous !== body.key) {
@@ -345,17 +364,17 @@ creator.get("/episodes/:id/media/:kind", async (c) => {
 // ---- analytics -----------------------------------------------------------
 
 creator.get("/analytics", async (c) => {
-  const id = c.get("user").sub;
+  const { sub: id, networkId } = c.get("user");
   const totals = await c.env.DB.prepare(
     `SELECT COUNT(*) AS total, COALESCE(SUM(is_published), 0) AS published, COALESCE(SUM(view_count), 0) AS views
-     FROM episodes WHERE creator_id = ?`,
+     FROM episodes WHERE creator_id = ? AND network_id = ?`,
   )
-    .bind(id)
+    .bind(id, networkId)
     .first<{ total: number; published: number; views: number }>();
   const { results } = await c.env.DB.prepare(
-    "SELECT id, title, view_count FROM episodes WHERE creator_id = ? ORDER BY view_count DESC, id LIMIT 5",
+    "SELECT id, title, view_count FROM episodes WHERE creator_id = ? AND network_id = ? ORDER BY view_count DESC, id LIMIT 5",
   )
-    .bind(id)
+    .bind(id, networkId)
     .all<{ id: string; title: string; view_count: number }>();
   return c.json({
     totalEpisodes: totals?.total ?? 0,

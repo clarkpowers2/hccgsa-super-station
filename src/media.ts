@@ -39,8 +39,8 @@ export const MEDIA_POLICY: Record<MediaKind, KindPolicy> = {
 export const isMediaKind = (v: unknown): v is MediaKind =>
   typeof v === "string" && Object.prototype.hasOwnProperty.call(MEDIA_POLICY, v);
 
-export const keyPrefix = (creatorId: string, episodeId: string, kind: MediaKind) =>
-  `${creatorId}/${episodeId}/${kind}/`;
+export const keyPrefix = (networkId: string, creatorId: string, episodeId: string, kind: MediaKind) =>
+  `networks/${networkId}/${creatorId}/${episodeId}/${kind}/`;
 
 export const UPLOAD_URL_TTL_SECONDS = 60 * 60 // large videos need time to upload;
 export const VIEW_URL_TTL_SECONDS = 60 * 60;
