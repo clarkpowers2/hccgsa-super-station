@@ -179,6 +179,13 @@ async function onAccountUpdated(env: Env, event: StripeEvent) {
   await env.DB.prepare("UPDATE users SET stripe_details_submitted = ?, stripe_ready = ? WHERE stripe_account_id = ?")
     .bind(a.details_submitted ? 1 : 0, ready ? 1 : 0, a.id)
     .run();
+  // Network Express accounts (5c) share this endpoint; matched on stripe_account_id so only that network changes.
+  await env.DB.prepare(
+    `UPDATE networks SET stripe_charges_enabled = ?, stripe_payouts_enabled = ?, stripe_details_submitted = ?,
+            updated_at = datetime('now') WHERE stripe_account_id = ?`,
+  )
+    .bind(a.charges_enabled ? 1 : 0, a.payouts_enabled ? 1 : 0, a.details_submitted ? 1 : 0, a.id)
+    .run();
 }
 
 async function onPayout(env: Env, event: StripeEvent) {

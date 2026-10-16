@@ -4,6 +4,7 @@ import type { AppBindings, Role } from "./types";
 import { issueToken, requireAuth, requireNetwork, requireRole } from "./auth";
 import { provisionNetwork, randomHex, sha256Hex } from "./provision";
 import { encryptSecret } from "./webhook-crypto";
+import { connectStatus } from "./stripe-express";
 
 type Ctx = Context<AppBindings>;
 
@@ -42,7 +43,7 @@ const ownerOnly = [requireNetwork, ownNetwork, requireRole("owner")] as const;
 
 async function networkView(c: Ctx) {
   const r = await c.env.DB.prepare(
-    `SELECT id, slug, display_name, description, branding, status, stripe_account_id, platform_fee_percent,
+    `SELECT id, slug, display_name, description, branding, status, stripe_account_id, stripe_charges_enabled, stripe_payouts_enabled, platform_fee_percent,
             public_api_key_hint, private_api_key_hint, created_at FROM networks WHERE id = ?`,
   )
     .bind(c.get("user").networkId)
@@ -55,7 +56,7 @@ async function networkView(c: Ctx) {
     description: r.description,
     branding: r.branding ? JSON.parse(r.branding) : null,
     status: r.status,
-    stripe: { status: r.stripe_account_id ? "connected" : "not_connected" },
+    stripe: { status: connectStatus(r as any) },
     platformFeePercent: r.platform_fee_percent,
     apiKeys: { public: `pk_…${r.public_api_key_hint}`, private: `sk_…${r.private_api_key_hint}` },
     createdAt: r.created_at,
