@@ -325,9 +325,9 @@ Tokens issued before this change are rejected once; users log in again.
 - ☑ RBAC enforced on creator routes: guests are blocked, other networks' episodes are invisible
 - ☐ Each network's Stripe account receives correct payouts minus platform fee
 - ☑ API keys generate, validate (SHA-256 lookup) and rate-limit (D1 fixed-window counter: 1000/hr public, 10k/hr private)
-- ☐ Webhooks signed and routed to correct network handler (registration ✓; delivery, HMAC signing and retries not built)
+- ☑ Webhooks signed and routed to correct network handler (HMAC-SHA256 `X-Webhook-Signature`, encrypted secrets, 4 attempts at 0/5/15/60 min, cron-driven delivery, network-isolated; tests in `test/webhook-delivery.test.ts`)
 - ☑ Live streaming tables exist, schema supports guest RTMP ingest + recording storage
-- ☐ Backward compatible: Phase 1 endpoints work, but existing sessions must re-login once
+- ☑ Backward compatible: pre-multi-network tokens are rejected with 401 and users re-login once (`test/networks.test.ts`)
 
 ---
 
@@ -602,7 +602,7 @@ Longest sequential dependency chain (blocks completion date):
 
 Done since: API key validation + rate limiting (5a).
 
-Next: Stripe Express provisioning (5b), webhook delivery + HMAC signing (5c), key rotation.
+Webhook delivery + HMAC signing built (5b). Next: Stripe Express provisioning (5c), key rotation, audit endpoints.
 
 Now that network provisioning and RBAC are working, build the management endpoints:
 
