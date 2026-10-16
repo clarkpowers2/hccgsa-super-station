@@ -206,7 +206,7 @@ Existing Phase 1 rows are backfilled into a seeded `net_freqone` network by the 
 1. **Register creator account + network, atomically** — `POST /api/auth/creator-register` inserts the user and the `networks` row (slug from creator name, `status='active'`) in one D1 batch. A duplicate email rolls back both; a slug collision gets a random suffix. No orphan networks.
 2. **Shared schema** — Network tables already exist; no per-network DB creation needed.
 3. **Create API keys** — Generate 2 keys: public (for browser embed) and private (server-to-server). Plaintext is returned once in the signup response; only SHA-256 hashes (plus last-4 hints) are stored.
-4. **Stripe Express account (lazy, built in 5c)** — Signup returns `stripe: { status: "not_connected" }`. The owner calls `POST /api/networks/{id}/stripe/onboard`, which creates the Express account on first use (idempotent per network), stores `stripe_account_id`, and returns a fresh onboarding link each time. `account.updated` webhooks keep `stripe_charges_enabled` / `stripe_payouts_enabled` / `stripe_details_submitted` current (migration 0008); `active` means charges and payouts are both enabled. Payment splitting and platform fees are 5d.
+4. **Stripe Express account (lazy, built in 5c)** — Signup returns `stripe: { status: "not_connected" }`. The owner calls `POST /api/networks/{id}/stripe/onboard`, which creates the Express account on first use (idempotent per network), stores `stripe_account_id`, and returns a fresh onboarding link each time. Per-creator Express onboarding already exists separately at `/api/creator/connect/*` and is unchanged. `account.updated` (via `/api/webhooks/stripe-connect`) keeps `stripe_charges_enabled` / `stripe_payouts_enabled` / `stripe_details_submitted` current (migration 0008); `active` means charges and payouts are both enabled. Payment splitting and platform fees are 5d.
 5. **DNS + CORS (not yet built)** — Optional subdomain `<network-slug>.freq.one` and per-network CORS origins.
 6. **Storage prefix** — Uploads go under `networks/<network_id>/…`.
 
@@ -255,7 +255,8 @@ Accounts with no network (viewers) can create one later via `POST /api/networks/
 | `DELETE /api/networks/{network_id}/webhooks/{webhook_id}` | DELETE | Delete webhook | JWT (admin+) | ✓ Built |
 | `POST /api/networks/{network_id}/stripe/onboard` | POST | Create the network's Stripe Express account (first call) and return a fresh onboarding link | JWT (owner) | ✓ Built (5c) |
 | `GET /api/networks/{network_id}/stripe/status` | GET | `not_connected` / `pending` / `active` + capability flags, read from D1 | JWT (admin+) | ✓ Built (5c) |
-| `POST /api/stripe/webhook` | POST | Stripe `account.updated` keeps the stored capability flags current | Public (Stripe-Signature) | ✓ Built (5c) |
+
+> `account.updated` for network accounts arrives via the existing `/api/webhooks/stripe-connect` receiver (signed with `STRIPE_CONNECT_WEBHOOK_SECRET`, deduped through `stripe_events`); there is no separate network webhook route.
 
 **Modified endpoints:**
 - All existing `/api/creator/*` endpoints enforce `network_id` in middleware and queries

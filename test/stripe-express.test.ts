@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { app } from "../src/index";
-import { call, makeEnv, mockStripe, one, stripeSignatureHeader } from "./helpers";
+import { call, makeEnv, mockStripe, one, postWebhook, run, stripeSignatureHeader } from "./helpers";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -41,19 +40,9 @@ function accountUpdated(id: string, flags: { charges?: boolean; payouts?: boolea
   };
 }
 
-async function postStripeWebhook(env: any, event: object, header?: string | null) {
-  const payload = JSON.stringify(event);
-  const sig = header === undefined ? stripeSignatureHeader(payload, env.STRIPE_WEBHOOK_SECRET) : header;
-  const res = await app.fetch(
-    new Request("http://localhost/api/stripe/webhook", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...(sig ? { "Stripe-Signature": sig } : {}) },
-      body: payload,
-    }),
-    env,
-  );
-  return { status: res.status, json: (await res.json()) as any };
-}
+/** Connect events arrive on the existing receiver, signed with the Connect secret. */
+const postStripeWebhook = (env: any, event: object, header?: string | null) =>
+  postWebhook(env, "stripe-connect", event, { header });
 
 describe("POST /api/networks/:id/stripe/onboard", () => {
   it("owner creates an Express account, stores it, and gets an onboarding link", async () => {
@@ -72,12 +61,13 @@ describe("POST /api/networks/:id/stripe/onboard", () => {
       "capabilities[transfers][requested]": "true",
       "metadata[network_id]": owner.nid,
     });
+    expect(create.headers["Idempotency-Key"]).toBe(`network-express-account-${owner.nid}`);
     const link = calls.find((c) => c.path === "/account_links")!;
     expect(link.params).toMatchObject({
       account: "acct_net1",
       type: "account_onboarding",
-      return_url: env.STRIPE_CONNECT_RETURN_URL,
-      refresh_url: env.STRIPE_CONNECT_REFRESH_URL,
+      return_url: "https://app.test/settings/payments?connected=1",
+      refresh_url: "https://app.test/settings/payments?refresh=1",
     });
     expect((await one<any>(env, "SELECT stripe_account_id FROM networks WHERE id = ?", owner.nid)).stripe_account_id).toBe("acct_net1");
   });
@@ -122,14 +112,6 @@ describe("POST /api/networks/:id/stripe/onboard", () => {
     expect(calls).toHaveLength(0);
     expect((await one<any>(env, "SELECT stripe_account_id FROM networks WHERE id = ?", b.nid)).stripe_account_id).toBeNull();
   });
-
-  it("returns 503 when the return/refresh URLs are not configured", async () => {
-    const { env } = makeEnv({ STRIPE_CONNECT_RETURN_URL: "" });
-    const calls = stripeWithAccounts();
-    const owner = await signup(env, "o@example.com");
-    expect((await call(env, "POST", `/api/networks/${owner.nid}/stripe/onboard`, { token: owner.token })).status).toBe(503);
-    expect(calls).toHaveLength(0);
-  });
 });
 
 describe("GET /api/networks/:id/stripe/status", () => {
@@ -154,6 +136,20 @@ describe("GET /api/networks/:id/stripe/status", () => {
     expect(calls.map((c) => c.path)).toEqual(["/accounts", "/account_links"]);
   });
 
+  it("GET /api/networks/:id reports the same status rule", async () => {
+    const { env } = makeEnv();
+    stripeWithAccounts();
+    const owner = await signup(env, "o@example.com");
+    const net = async () => (await call(env, "GET", `/api/networks/${owner.nid}`, { token: owner.token })).json.stripe.status;
+    expect(await net()).toBe("not_connected");
+    await call(env, "POST", `/api/networks/${owner.nid}/stripe/onboard`, { token: owner.token });
+    expect(await net()).toBe("pending");
+    await postStripeWebhook(env, accountUpdated("acct_net1", { charges: true, details: true }, "evt_c"));
+    expect(await net()).toBe("pending"); // payouts still off
+    await postStripeWebhook(env, accountUpdated("acct_net1", { charges: true, payouts: true, details: true }, "evt_d"));
+    expect(await net()).toBe("active");
+  });
+
   it("allows admin, refuses creator/guest, and refuses another network", async () => {
     const { env } = makeEnv();
     stripeWithAccounts();
@@ -167,7 +163,7 @@ describe("GET /api/networks/:id/stripe/status", () => {
   });
 });
 
-describe("POST /api/stripe/webhook", () => {
+describe("account.updated via /api/webhooks/stripe-connect", () => {
   it("rejects a bad, missing, stale or wrong-secret signature with 400 and changes nothing", async () => {
     const { env } = makeEnv();
     stripeWithAccounts();
@@ -179,7 +175,8 @@ describe("POST /api/stripe/webhook", () => {
     expect((await postStripeWebhook(env, event, "t=1,v1=deadbeef")).status).toBe(400);
     expect((await postStripeWebhook(env, event, null)).status).toBe(400);
     expect((await postStripeWebhook(env, event, stripeSignatureHeader(payload, "some-other-secret"))).status).toBe(400);
-    expect((await postStripeWebhook(env, event, stripeSignatureHeader(payload, env.STRIPE_WEBHOOK_SECRET, 1_000))).status).toBe(400);
+    expect((await postStripeWebhook(env, event, stripeSignatureHeader(payload, env.STRIPE_WEBHOOK_SECRET))).status).toBe(400); // platform secret
+    expect((await postStripeWebhook(env, event, stripeSignatureHeader(payload, env.STRIPE_CONNECT_WEBHOOK_SECRET, 1_000))).status).toBe(400);
 
     const row = await one<any>(env, "SELECT stripe_charges_enabled, stripe_payouts_enabled, stripe_details_submitted FROM networks WHERE id = ?", owner.nid);
     expect(row).toEqual({ stripe_charges_enabled: 0, stripe_payouts_enabled: 0, stripe_details_submitted: 0 });
@@ -216,6 +213,35 @@ describe("POST /api/stripe/webhook", () => {
     expect((await postStripeWebhook(env, { id: "evt_x", object: "event", type: "customer.created", data: { object: { id: "cus_1" } } })).status).toBe(200);
     const row = await one<any>(env, "SELECT stripe_charges_enabled FROM networks WHERE id = ?", owner.nid);
     expect(row.stripe_charges_enabled).toBe(0);
+  });
+
+  it("processes the same event id once", async () => {
+    const { env } = makeEnv();
+    stripeWithAccounts();
+    const owner = await signup(env, "o@example.com");
+    await call(env, "POST", `/api/networks/${owner.nid}/stripe/onboard`, { token: owner.token });
+    const event = accountUpdated("acct_net1", { charges: true, payouts: true, details: true }, "evt_dupe");
+    const flags = () => one<any>(env, "SELECT stripe_charges_enabled c FROM networks WHERE id = ?", owner.nid);
+
+    expect((await postStripeWebhook(env, event)).json).toEqual({ received: true });
+    expect((await flags()).c).toBe(1);
+
+    // reset the row; a replay of the same event id must not re-apply it
+    await run(env, "UPDATE networks SET stripe_charges_enabled = 0 WHERE id = ?", owner.nid);
+    expect((await postStripeWebhook(env, event)).json).toEqual({ received: true, duplicate: true });
+    expect((await flags()).c).toBe(0);
+    expect((await one<any>(env, "SELECT COUNT(*) n FROM stripe_events WHERE id = 'evt_dupe'")).n).toBe(1);
+  });
+
+  it("also leaves the creator (users) update working for the same event", async () => {
+    const { env } = makeEnv();
+    stripeWithAccounts();
+    const owner = await signup(env, "o@example.com");
+    await call(env, "POST", `/api/networks/${owner.nid}/stripe/onboard`, { token: owner.token });
+    await run(env, "UPDATE users SET stripe_account_id = 'acct_creator' WHERE email = 'o@example.com'");
+    await postStripeWebhook(env, accountUpdated("acct_creator", { details: true }, "evt_u"));
+    expect((await one<any>(env, "SELECT stripe_details_submitted d FROM users WHERE email = 'o@example.com'")).d).toBe(1);
+    expect((await one<any>(env, "SELECT stripe_details_submitted d FROM networks WHERE id = ?", owner.nid)).d).toBe(0); // different account id
   });
 
   it("is public: no JWT needed", async () => {

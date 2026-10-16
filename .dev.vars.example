@@ -5,8 +5,6 @@ STRIPE_SECRET_KEY=your_test_secret_key_here
 STRIPE_WEBHOOK_SECRET=your_webhook_secret_here
 STRIPE_CONNECT_WEBHOOK_SECRET=your_connect_webhook_secret_here
 APP_URL=http://localhost:3000
-STRIPE_CONNECT_RETURN_URL=http://localhost:3000/settings/payments?stripe=return
-STRIPE_CONNECT_REFRESH_URL=http://localhost:3000/settings/payments?stripe=refresh
 ANTHROPIC_API_KEY=your_key_here
 R2_ACCOUNT_ID=your_cloudflare_account_id_here
 R2_ACCESS_KEY_ID=your_r2_access_key_id_here
