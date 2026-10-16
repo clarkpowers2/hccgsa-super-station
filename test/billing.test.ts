@@ -10,15 +10,26 @@ async function register(env: any, email: string) {
   return { token: r.json.token as string, id: r.json.id as string };
 }
 
-/** A creator who finished Stripe onboarding, offers a $5 subscription, and has one published $4.99 episode. */
+/** Makes a network able to take payments: an Express account with charges and payouts enabled. */
+async function activateNetwork(env: any, networkId: string, account: string) {
+  await run(env, "UPDATE networks SET stripe_account_id=?, stripe_charges_enabled=1, stripe_payouts_enabled=1 WHERE id=?", account, networkId);
+}
+
+/**
+ * A creator whose network finished Stripe onboarding (acct_network, default 15% fee), who offers a $5
+ * subscription and has one published $4.99 episode. The creator's own Connect account is set too and must
+ * never be the payee.
+ */
 async function world() {
   const t = makeEnv();
   const creator = await registerCreator(t.env, "creator@example.com");
   await run(t.env, "UPDATE users SET stripe_account_id='acct_creator', stripe_ready=1, subscription_price_cents=500 WHERE id=?", creator.id);
+  const networkId = (await one<any>(t.env, "SELECT network_id n FROM users WHERE id=?", creator.id)).n as string;
+  await activateNetwork(t.env, networkId, "acct_network");
   const ep = await call(t.env, "POST", "/api/creator/episodes", { token: creator.token, body: { title: "Pilot", oneTimePriceCents: 499 } });
   await run(t.env, "UPDATE episodes SET video_key='k/video.mp4', is_published=1, publish_date=datetime('now') WHERE id=?", ep.json.id);
   const viewer = await register(t.env, "viewer@example.com");
-  return { ...t, creator, viewer, episodeId: ep.json.id as string };
+  return { ...t, creator, viewer, networkId, episodeId: ep.json.id as string };
 }
 
 const episodePaid = (w: any, id = "evt_ep1", pi = "pi_1", amount = 499) => ({
@@ -119,7 +130,7 @@ describe("Stripe Connect onboarding", () => {
 });
 
 describe("subscription checkout", () => {
-  it("creates a destination-charge checkout with a 20% application fee", async () => {
+  it("creates a destination-charge checkout to the network account with the network fee", async () => {
     const w = await world();
     const calls = mockStripe();
     const r = await call(w.env, "POST", "/api/subscriptions", { token: w.viewer.token, body: { creatorId: w.creator.id } });
@@ -130,8 +141,12 @@ describe("subscription checkout", () => {
       customer_email: "viewer@example.com",
       "line_items[0][price_data][unit_amount]": "500",
       "line_items[0][price_data][recurring][interval]": "month",
-      "subscription_data[application_fee_percent]": "20",
-      "subscription_data[transfer_data][destination]": "acct_creator",
+      "subscription_data[application_fee_percent]": "15",
+      "subscription_data[transfer_data][destination]": "acct_network",
+      "subscription_data[metadata][network_id]": w.networkId,
+      "subscription_data[metadata][fee_percent]": "15",
+      "metadata[network_id]": w.networkId,
+      "metadata[fee_percent]": "15",
       "subscription_data[metadata][viewer_id]": w.viewer.id,
       "subscription_data[metadata][creator_id]": w.creator.id,
       "subscription_data[metadata][type]": "subscription",
@@ -139,7 +154,7 @@ describe("subscription checkout", () => {
     expect(JSON.stringify(calls)).not.toContain("password");
   });
 
-  it("refuses self-subscription, unknown creators, no-price, not-ready, and duplicates", async () => {
+  it("refuses self-subscription, unknown creators, no-price, network-not-ready, and duplicates", async () => {
     const w = await world();
     mockStripe();
     const sub = (token: string, creatorId: string) => call(w.env, "POST", "/api/subscriptions", { token, body: { creatorId } });
@@ -147,9 +162,12 @@ describe("subscription checkout", () => {
     expect((await sub(w.viewer.token, "nope")).status).toBe(404);
     const otherViewer = await register(w.env, "plain@example.com");
     expect((await sub(w.viewer.token, otherViewer.id)).status).toBe(404); // viewers are not creators
-    await run(w.env, "UPDATE users SET stripe_ready=0 WHERE id=?", w.creator.id);
-    expect((await sub(w.viewer.token, w.creator.id)).status).toBe(409);
-    await run(w.env, "UPDATE users SET stripe_ready=1, subscription_price_cents=NULL WHERE id=?", w.creator.id);
+    await run(w.env, "UPDATE networks SET stripe_payouts_enabled=0 WHERE id=?", w.networkId);
+    const notReady = await sub(w.viewer.token, w.creator.id);
+    expect(notReady.status).toBe(409);
+    expect(notReady.json).toEqual({ error: "network cannot accept payments yet" });
+    await run(w.env, "UPDATE networks SET stripe_payouts_enabled=1 WHERE id=?", w.networkId);
+    await run(w.env, "UPDATE users SET subscription_price_cents=NULL WHERE id=?", w.creator.id);
     expect((await sub(w.viewer.token, w.creator.id)).status).toBe(409);
     await run(w.env, "UPDATE users SET subscription_price_cents=500 WHERE id=?", w.creator.id);
     await postWebhook(w.env, "stripe", subCompleted(w));
@@ -169,7 +187,7 @@ describe("subscription checkout", () => {
 });
 
 describe("subscription lifecycle via webhooks", () => {
-  it("activates, records 80/20 revenue, grants access, then revokes on cancellation", async () => {
+  it("activates, records revenue at the fee Stripe applied, grants access, then revokes on cancellation", async () => {
     const w = await world();
     expect((await stream(w, w.viewer.token)).status).toBe(403);
 
@@ -238,7 +256,7 @@ describe("subscription lifecycle via webhooks", () => {
 });
 
 describe("one-time purchase", () => {
-  it("creates a destination-charge checkout with an exact application fee", async () => {
+  it("creates a destination-charge checkout to the network account with an exact network fee", async () => {
     const w = await world();
     const calls = mockStripe();
     const r = await call(w.env, "POST", "/api/purchases", { token: w.viewer.token, body: { episodeId: w.episodeId } });
@@ -246,14 +264,18 @@ describe("one-time purchase", () => {
     expect(calls[0]!.params).toMatchObject({
       mode: "payment",
       "line_items[0][price_data][unit_amount]": "499",
-      "payment_intent_data[application_fee_amount]": "100",
-      "payment_intent_data[transfer_data][destination]": "acct_creator",
+      "payment_intent_data[application_fee_amount]": "75", // 15% of 499 = 74.85
+      "payment_intent_data[transfer_data][destination]": "acct_network",
       "payment_intent_data[metadata][episode_id]": w.episodeId,
+      "payment_intent_data[metadata][network_id]": w.networkId,
+      "payment_intent_data[metadata][fee_percent]": "15",
+      "metadata[network_id]": w.networkId,
+      "metadata[fee_percent]": "15",
       "metadata[type]": "episode",
     });
   });
 
-  it("refuses unpublished, free, own, not-ready, and already-owned episodes", async () => {
+  it("refuses unpublished, free, own, network-not-ready, and already-owned episodes", async () => {
     const w = await world();
     mockStripe();
     const buy = (token: string, episodeId = w.episodeId) => call(w.env, "POST", "/api/purchases", { token, body: { episodeId } });
@@ -262,9 +284,11 @@ describe("one-time purchase", () => {
     await run(w.env, "UPDATE episodes SET one_time_price_cents=NULL WHERE id=?", w.episodeId);
     expect((await buy(w.viewer.token)).status).toBe(409);
     await run(w.env, "UPDATE episodes SET one_time_price_cents=499 WHERE id=?", w.episodeId);
-    await run(w.env, "UPDATE users SET stripe_ready=0 WHERE id=?", w.creator.id);
-    expect((await buy(w.viewer.token)).status).toBe(409);
-    await run(w.env, "UPDATE users SET stripe_ready=1 WHERE id=?", w.creator.id);
+    await run(w.env, "UPDATE networks SET stripe_charges_enabled=0 WHERE id=?", w.networkId);
+    const notReady = await buy(w.viewer.token);
+    expect(notReady.status).toBe(409);
+    expect(notReady.json).toEqual({ error: "network cannot accept payments yet" });
+    await run(w.env, "UPDATE networks SET stripe_charges_enabled=1 WHERE id=?", w.networkId);
     await run(w.env, "UPDATE episodes SET is_published=0 WHERE id=?", w.episodeId);
     expect((await buy(w.viewer.token)).status).toBe(404);
     await run(w.env, "UPDATE episodes SET is_published=1 WHERE id=?", w.episodeId);
@@ -282,7 +306,7 @@ describe("one-time purchase", () => {
 
     expect(await all(w.env, "SELECT * FROM purchases")).toHaveLength(1);
     expect(await all(w.env, "SELECT * FROM revenue")).toHaveLength(1);
-    expect(await one(w.env, "SELECT gross_cents g, platform_fee_cents f, creator_cents c FROM revenue")).toEqual({ g: 499, f: 100, c: 399 });
+    expect(await one(w.env, "SELECT gross_cents g, platform_fee_cents f, creator_cents c FROM revenue")).toEqual({ g: 499, f: 75, c: 424 });
 
     const list = await call(w.env, "GET", "/api/viewer/purchases", { token: w.viewer.token });
     expect(list.json.purchases).toMatchObject([{ episodeId: w.episodeId, amountCents: 499 }]);
@@ -294,7 +318,7 @@ describe("one-time purchase", () => {
     expect((await one<any>(w.env, "SELECT view_count v FROM episodes")).v).toBe(1);
 
     const earnings = await call(w.env, "GET", "/api/creator/earnings", { token: w.creator.token });
-    expect(earnings.json.lifetime).toEqual({ grossCents: 499, platformFeeCents: 100, creatorCents: 399 });
+    expect(earnings.json.lifetime).toEqual({ grossCents: 499, platformFeeCents: 75, creatorCents: 424 });
     expect(earnings.json.months).toMatchObject([{ month: "2025-10", charges: 1, grossCents: 499 }]);
   });
 

@@ -2,7 +2,8 @@ import { Hono } from "hono";
 import type { AppBindings, Env } from "./types";
 import { requireAuth } from "./auth";
 import { stripePost } from "./stripe";
-import { PLATFORM_FEE_PERCENT, splitAmount } from "./fees";
+import { splitAmount } from "./fees";
+import { connectStatus } from "./stripe-express";
 import { MEDIA_POLICY, isMediaKind, signedViewUrl } from "./media";
 
 export const billing = new Hono<AppBindings>();
@@ -10,20 +11,38 @@ export const billing = new Hono<AppBindings>();
 interface CreatorRow {
   id: string;
   creator_name: string;
-  stripe_account_id: string | null;
-  stripe_ready: number;
+  network_id: string | null;
   subscription_price_cents: number | null;
 }
 
 async function loadCreator(env: Env, id: string) {
-  return env.DB.prepare(
-    "SELECT id, creator_name, stripe_account_id, stripe_ready, subscription_price_cents FROM users WHERE id = ? AND is_creator = 1",
-  )
+  return env.DB.prepare("SELECT id, creator_name, network_id, subscription_price_cents FROM users WHERE id = ? AND is_creator = 1")
     .bind(id)
     .first<CreatorRow>();
 }
 
-const canTakePayments = (c: CreatorRow) => c.stripe_ready === 1 && !!c.stripe_account_id;
+/**
+ * Network content is paid to the network's own Stripe account (not the creator's). Returns null unless the network
+ * exists and its Stripe status is "active"; there is no fallback to the creator account.
+ */
+async function loadPayee(env: Env, networkId: string | null) {
+  if (!networkId) return null;
+  const n = await env.DB.prepare(
+    "SELECT id, stripe_account_id, stripe_charges_enabled, stripe_payouts_enabled, platform_fee_percent FROM networks WHERE id = ?",
+  )
+    .bind(networkId)
+    .first<{
+      id: string;
+      stripe_account_id: string | null;
+      stripe_charges_enabled: number;
+      stripe_payouts_enabled: number;
+      platform_fee_percent: number;
+    }>();
+  if (!n || connectStatus(n) !== "active") return null;
+  return { networkId: n.id, account: n.stripe_account_id!, feePercent: n.platform_fee_percent };
+}
+
+const NETWORK_NOT_READY = "network cannot accept payments yet";
 
 async function viewerBilling(env: Env, id: string) {
   return env.DB.prepare("SELECT email, stripe_customer_id FROM users WHERE id = ?")
@@ -58,11 +77,14 @@ billing.post("/subscriptions", requireAuth, async (c) => {
   const creator = await loadCreator(c.env, body.creatorId);
   if (!creator) return c.json({ error: "creator not found" }, 404);
   if (!creator.subscription_price_cents) return c.json({ error: "creator does not offer subscriptions" }, 409);
-  if (!canTakePayments(creator)) return c.json({ error: "creator cannot accept payments yet" }, 409);
+  const payee = await loadPayee(c.env, creator.network_id);
+  if (!payee) return c.json({ error: NETWORK_NOT_READY }, 409);
   if (await hasActiveSubscription(c.env, viewerId, creator.id)) return c.json({ error: "already subscribed" }, 409);
 
   const viewer = (await viewerBilling(c.env, viewerId))!;
-  const meta = { type: "subscription", viewer_id: viewerId, creator_id: creator.id };
+  splitAmount(0, payee.feePercent); // rejects a corrupt stored rate before we talk to Stripe
+  // fee_percent is frozen here; the webhooks record revenue at this rate even if the network's rate changes later.
+  const meta = { type: "subscription", viewer_id: viewerId, creator_id: creator.id, network_id: payee.networkId, fee_percent: payee.feePercent };
   const session = await stripePost(c.env, "/checkout/sessions", {
     mode: "subscription",
     success_url: `${c.env.APP_URL}/subscriptions/success?session_id={CHECKOUT_SESSION_ID}`,
@@ -81,8 +103,8 @@ billing.post("/subscriptions", requireAuth, async (c) => {
       },
     ],
     subscription_data: {
-      application_fee_percent: PLATFORM_FEE_PERCENT,
-      transfer_data: { destination: creator.stripe_account_id },
+      ...(payee.feePercent > 0 ? { application_fee_percent: payee.feePercent } : {}), // no fee to apply: omit the param
+      transfer_data: { destination: payee.account },
       metadata: meta,
     },
     metadata: meta,
@@ -133,21 +155,29 @@ billing.post("/purchases", requireAuth, async (c) => {
   if (typeof body.episodeId !== "string") return c.json({ error: "episodeId required" }, 400);
 
   const ep = await c.env.DB.prepare(
-    "SELECT id, creator_id, title, one_time_price_cents FROM episodes WHERE id = ? AND is_published = 1",
+    "SELECT id, creator_id, network_id, title, one_time_price_cents FROM episodes WHERE id = ? AND is_published = 1",
   )
     .bind(body.episodeId)
-    .first<{ id: string; creator_id: string; title: string; one_time_price_cents: number | null }>();
+    .first<{ id: string; creator_id: string; network_id: string | null; title: string; one_time_price_cents: number | null }>();
   if (!ep) return c.json({ error: "episode not found" }, 404);
   if (ep.creator_id === viewerId) return c.json({ error: "you own this episode" }, 400);
   if (!ep.one_time_price_cents) return c.json({ error: "episode is not for sale" }, 409);
 
-  const creator = await loadCreator(c.env, ep.creator_id);
-  if (!creator || !canTakePayments(creator)) return c.json({ error: "creator cannot accept payments yet" }, 409);
+  const payee = await loadPayee(c.env, ep.network_id);
+  if (!payee) return c.json({ error: NETWORK_NOT_READY }, 409);
   if ((await hasPurchased(c.env, viewerId, ep.id)) || (await hasActiveSubscription(c.env, viewerId, ep.creator_id)))
     return c.json({ error: "you already have access" }, 409);
 
   const viewer = (await viewerBilling(c.env, viewerId))!;
-  const meta = { type: "episode", viewer_id: viewerId, episode_id: ep.id, creator_id: ep.creator_id };
+  const fee = splitAmount(ep.one_time_price_cents, payee.feePercent).platformFeeCents;
+  const meta = {
+    type: "episode",
+    viewer_id: viewerId,
+    episode_id: ep.id,
+    creator_id: ep.creator_id,
+    network_id: payee.networkId,
+    fee_percent: payee.feePercent, // frozen at checkout time
+  };
   const session = await stripePost(c.env, "/checkout/sessions", {
     mode: "payment",
     success_url: `${c.env.APP_URL}/episodes/${ep.id}?purchased=1`,
@@ -161,8 +191,8 @@ billing.post("/purchases", requireAuth, async (c) => {
       },
     ],
     payment_intent_data: {
-      application_fee_amount: splitAmount(ep.one_time_price_cents).platformFeeCents,
-      transfer_data: { destination: creator.stripe_account_id },
+      ...(fee > 0 ? { application_fee_amount: fee } : {}), // no fee to apply: omit the param
+      transfer_data: { destination: payee.account },
       metadata: meta,
     },
     metadata: meta,

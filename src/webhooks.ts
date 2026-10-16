@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import type { AppBindings, Env } from "./types";
 import { verifyStripeSignature } from "./stripe";
-import { splitAmount, sqlTime } from "./fees";
+import { isValidFeePercent, splitAmount, sqlTime } from "./fees";
 
 interface StripeEvent {
   id: string;
@@ -22,7 +22,7 @@ const mapStatus = (s: string) =>
  */
 async function upsertSubscription(
   env: Env,
-  s: { viewerId: string; creatorId: string; stripeSubId: string; status: string; priceCents: number; startedAt: number; nextBilling?: number },
+  s: { viewerId: string; creatorId: string; networkId: string | null; stripeSubId: string; status: string; priceCents: number; startedAt: number; nextBilling?: number },
   opts: { overwrite: boolean },
 ) {
   const conflict = opts.overwrite
@@ -33,14 +33,15 @@ async function upsertSubscription(
        WHERE subscriptions.status != 'canceled'`
     : "DO NOTHING";
   await env.DB.prepare(
-    `INSERT INTO subscriptions (id, viewer_id, creator_id, stripe_subscription_id, status, price_per_month_cents, started_at, next_billing_date)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO subscriptions (id, viewer_id, creator_id, network_id, stripe_subscription_id, status, price_per_month_cents, started_at, next_billing_date)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(stripe_subscription_id) ${conflict}`,
   )
     .bind(
       crypto.randomUUID(),
       s.viewerId,
       s.creatorId,
+      s.networkId,
       s.stripeSubId,
       s.status,
       s.priceCents,
@@ -52,13 +53,13 @@ async function upsertSubscription(
 
 async function recordRevenue(
   env: Env,
-  r: { creatorId: string; viewerId: string | null; source: "subscription" | "purchase"; objectId: string; gross: number; fee: number; at: number },
+  r: { creatorId: string; networkId: string | null; viewerId: string | null; source: "subscription" | "purchase"; objectId: string; gross: number; fee: number; at: number },
 ) {
   await env.DB.prepare(
-    `INSERT OR IGNORE INTO revenue (id, creator_id, viewer_id, source, stripe_object_id, gross_cents, platform_fee_cents, creator_cents, occurred_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR IGNORE INTO revenue (id, creator_id, network_id, viewer_id, source, stripe_object_id, gross_cents, platform_fee_cents, creator_cents, occurred_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   )
-    .bind(crypto.randomUUID(), r.creatorId, r.viewerId, r.source, r.objectId, r.gross, r.fee, r.gross - r.fee, sqlTime(r.at))
+    .bind(crypto.randomUUID(), r.creatorId, r.networkId, r.viewerId, r.source, r.objectId, r.gross, r.fee, r.gross - r.fee, sqlTime(r.at))
     .run();
 }
 
@@ -67,40 +68,64 @@ async function userExists(env: Env, id: string | undefined) {
   return (await env.DB.prepare("SELECT 1 AS x FROM users WHERE id = ?").bind(id).first()) !== null;
 }
 
+/** The creator's network, from our own row (never from Stripe metadata). Undefined = no such user. */
+async function creatorNetworkId(env: Env, id: string | undefined) {
+  if (!id) return undefined;
+  const row = await env.DB.prepare("SELECT network_id FROM users WHERE id = ?").bind(id).first<{ network_id: string | null }>();
+  return row ? row.network_id : undefined;
+}
+
+/**
+ * The rate to book revenue at: the one frozen into the Checkout metadata when the payment was created,
+ * else the network's current platform_fee_percent. An unresolvable rate throws (500 -> Stripe retries)
+ * rather than booking a guess.
+ */
+async function feePercentFor(env: Env, metaFeePercent: unknown, networkId: string | null) {
+  const frozen = typeof metaFeePercent === "string" && metaFeePercent !== "" ? Number(metaFeePercent) : metaFeePercent;
+  if (isValidFeePercent(frozen)) return frozen;
+  const net = networkId
+    ? await env.DB.prepare("SELECT platform_fee_percent FROM networks WHERE id = ?").bind(networkId).first<{ platform_fee_percent: number }>()
+    : null;
+  if (!net || !isValidFeePercent(net.platform_fee_percent)) throw new Error("no valid platform fee rate for revenue");
+  return net.platform_fee_percent;
+}
+
 async function onCheckoutCompleted(env: Env, event: StripeEvent) {
   const s = event.data.object;
   const meta = s.metadata ?? {};
 
   if (meta.type === "episode") {
     if (s.payment_status !== "paid" || !s.payment_intent) return;
-    const episode = await env.DB.prepare("SELECT id, creator_id FROM episodes WHERE id = ?")
+    const episode = await env.DB.prepare("SELECT id, creator_id, network_id FROM episodes WHERE id = ?")
       .bind(meta.episode_id)
-      .first<{ id: string; creator_id: string }>();
+      .first<{ id: string; creator_id: string; network_id: string | null }>();
     if (!episode || !(await userExists(env, meta.viewer_id))) {
       console.error("checkout for unknown episode/viewer", event.id);
       return; // nothing we can attach it to; don't make Stripe retry forever
     }
     const gross = s.amount_total as number;
     await env.DB.prepare(
-      `INSERT OR IGNORE INTO purchases (id, viewer_id, episode_id, stripe_payment_intent_id, amount_cents, status, purchased_at)
-       VALUES (?, ?, ?, ?, ?, 'completed', datetime('now'))`,
+      `INSERT OR IGNORE INTO purchases (id, viewer_id, episode_id, network_id, stripe_payment_intent_id, amount_cents, status, purchased_at)
+       VALUES (?, ?, ?, ?, ?, ?, 'completed', datetime('now'))`,
     )
-      .bind(crypto.randomUUID(), meta.viewer_id, episode.id, s.payment_intent, gross)
+      .bind(crypto.randomUUID(), meta.viewer_id, episode.id, episode.network_id, s.payment_intent, gross)
       .run();
     await recordRevenue(env, {
       creatorId: episode.creator_id,
+      networkId: episode.network_id,
       viewerId: meta.viewer_id,
       source: "purchase",
       objectId: s.payment_intent,
       gross,
-      fee: splitAmount(gross).platformFeeCents,
+      fee: splitAmount(gross, await feePercentFor(env, meta.fee_percent, episode.network_id)).platformFeeCents,
       at: event.created,
     });
     return;
   }
 
   if (meta.type === "subscription" && s.subscription) {
-    if (!(await userExists(env, meta.viewer_id)) || !(await userExists(env, meta.creator_id))) {
+    const networkId = await creatorNetworkId(env, meta.creator_id);
+    if (!(await userExists(env, meta.viewer_id)) || networkId === undefined) {
       console.error("checkout for unknown viewer/creator", event.id);
       return;
     }
@@ -109,6 +134,7 @@ async function onCheckoutCompleted(env: Env, event: StripeEvent) {
       {
         viewerId: meta.viewer_id,
         creatorId: meta.creator_id,
+        networkId,
         stripeSubId: s.subscription,
         status: "active",
         priceCents: s.amount_total,
@@ -126,15 +152,20 @@ async function onInvoicePaid(env: Env, event: StripeEvent) {
   const inv = event.data.object;
   const meta = inv.subscription_details?.metadata ?? {};
   if (!inv.subscription || meta.type !== "subscription" || !(inv.amount_paid > 0)) return;
-  if (!(await userExists(env, meta.creator_id))) {
+  const networkId = await creatorNetworkId(env, meta.creator_id);
+  if (networkId === undefined) {
     console.error("invoice for unknown creator", event.id);
     return;
   }
   const gross = inv.amount_paid as number;
-  // Prefer the fee Stripe actually applied; fall back to our own calculation.
-  const fee = typeof inv.application_fee_amount === "number" ? inv.application_fee_amount : splitAmount(gross).platformFeeCents;
+  // Prefer the fee Stripe actually applied; else the rate frozen at checkout; else the network's current rate.
+  const fee =
+    typeof inv.application_fee_amount === "number"
+      ? inv.application_fee_amount
+      : splitAmount(gross, await feePercentFor(env, meta.fee_percent, networkId)).platformFeeCents;
   await recordRevenue(env, {
     creatorId: meta.creator_id,
+    networkId,
     viewerId: (await userExists(env, meta.viewer_id)) ? meta.viewer_id : null,
     source: "subscription",
     objectId: inv.id,
@@ -148,13 +179,15 @@ async function onSubscriptionChanged(env: Env, event: StripeEvent) {
   const sub = event.data.object;
   const meta = sub.metadata ?? {};
   if (meta.type !== "subscription") return;
-  if (!(await userExists(env, meta.viewer_id)) || !(await userExists(env, meta.creator_id))) return;
+  const networkId = await creatorNetworkId(env, meta.creator_id);
+  if (!(await userExists(env, meta.viewer_id)) || networkId === undefined) return;
   const status = event.type === "customer.subscription.deleted" ? "canceled" : mapStatus(sub.status);
   await upsertSubscription(
     env,
     {
       viewerId: meta.viewer_id,
       creatorId: meta.creator_id,
+      networkId,
       stripeSubId: sub.id,
       status,
       priceCents: sub.items?.data?.[0]?.price?.unit_amount ?? 0,
