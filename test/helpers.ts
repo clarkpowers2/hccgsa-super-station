@@ -88,6 +88,8 @@ export function makeEnv(overrides: Partial<Env> = {}) {
     STRIPE_WEBHOOK_SECRET: "test-platform-webhook-secret",
     STRIPE_CONNECT_WEBHOOK_SECRET: "test-connect-webhook-secret",
     APP_URL: "https://app.test",
+    STRIPE_CONNECT_RETURN_URL: "https://app.test/stripe/return",
+    STRIPE_CONNECT_REFRESH_URL: "https://app.test/stripe/refresh",
     // Generated per test run; never a real key.
     WEBHOOK_ENC_KEY: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64"),
     ...overrides,

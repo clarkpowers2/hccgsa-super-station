@@ -12,6 +12,7 @@ import type { Env } from "./types";
 import { signedViewUrl } from "./media";
 import { publicApi, publishedEpisodeView } from "./public";
 import { networks } from "./networks";
+import { stripeExpress } from "./stripe-express";
 import type { AppBindings } from "./types";
 
 const app = new Hono<AppBindings>();
@@ -35,6 +36,7 @@ app.route("/api/creator", creatorBilling);
 app.route("/api", billing);
 app.route("/api/webhooks", webhooks);
 app.route("/api/networks", networks);
+app.route("/api", stripeExpress);
 app.route("/api/public", publicApi);
 
 app.get("/api/episodes", async (c) => {

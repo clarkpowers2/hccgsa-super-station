@@ -206,7 +206,7 @@ Existing Phase 1 rows are backfilled into a seeded `net_freqone` network by the 
 1. **Register creator account + network, atomically** — `POST /api/auth/creator-register` inserts the user and the `networks` row (slug from creator name, `status='active'`) in one D1 batch. A duplicate email rolls back both; a slug collision gets a random suffix. No orphan networks.
 2. **Shared schema** — Network tables already exist; no per-network DB creation needed.
 3. **Create API keys** — Generate 2 keys: public (for browser embed) and private (server-to-server). Plaintext is returned once in the signup response; only SHA-256 hashes (plus last-4 hints) are stored.
-4. **Stripe Express account (lazy, not yet built)** — Signup returns `stripe: { status: "not_connected" }`. Real provisioning happens when the owner first enables paid listeners (Week 5–6).
+4. **Stripe Express account (lazy, built in 5c)** — Signup returns `stripe: { status: "not_connected" }`. The owner calls `POST /api/networks/{id}/stripe/onboard`, which creates the Express account on first use (idempotent per network), stores `stripe_account_id`, and returns a fresh onboarding link each time. `account.updated` webhooks keep `stripe_charges_enabled` / `stripe_payouts_enabled` / `stripe_details_submitted` current (migration 0008); `active` means charges and payouts are both enabled. Payment splitting and platform fees are 5d.
 5. **DNS + CORS (not yet built)** — Optional subdomain `<network-slug>.freq.one` and per-network CORS origins.
 6. **Storage prefix** — Uploads go under `networks/<network_id>/…`.
 
@@ -250,9 +250,12 @@ Accounts with no network (viewers) can create one later via `POST /api/networks/
 | `POST /api/networks/{network_id}/users` | POST | Create invite; returns a 24h onboarding link (no email sent) | JWT (owner) | ✓ Built |
 | `PUT /api/networks/{network_id}/users/{user_id}` | PUT | Change user role or revoke access | JWT (owner) | ✓ Built |
 | `POST /api/auth/accept-invite` | POST | Redeem an onboarding link, create the account | Public | ✓ Built |
-| `POST /api/networks/{network_id}/webhooks` | POST | Register webhook (secret shown once) | JWT (admin+) | ✓ Built (no delivery/signing yet) |
+| `POST /api/networks/{network_id}/webhooks` | POST | Register webhook (secret shown once) | JWT (admin+) | ✓ Built (HMAC-signed, cron-driven delivery: 5b) |
 | `GET /api/networks/{network_id}/webhooks` | GET | List webhooks | JWT (admin+) | ✓ Built |
 | `DELETE /api/networks/{network_id}/webhooks/{webhook_id}` | DELETE | Delete webhook | JWT (admin+) | ✓ Built |
+| `POST /api/networks/{network_id}/stripe/onboard` | POST | Create the network's Stripe Express account (first call) and return a fresh onboarding link | JWT (owner) | ✓ Built (5c) |
+| `GET /api/networks/{network_id}/stripe/status` | GET | `not_connected` / `pending` / `active` + capability flags, read from D1 | JWT (admin+) | ✓ Built (5c) |
+| `POST /api/stripe/webhook` | POST | Stripe `account.updated` keeps the stored capability flags current | Public (Stripe-Signature) | ✓ Built (5c) |
 
 **Modified endpoints:**
 - All existing `/api/creator/*` endpoints enforce `network_id` in middleware and queries
@@ -312,7 +315,7 @@ Tokens issued before this change are rejected once; users log in again.
 |------|------|
 | 1–2 | Network provisioning, JWT/RBAC enforcement, query scoping, isolation tests ✓ |
 | 3–4 | User management, invites, settings, webhook registration ✓; remaining: audit endpoints, token rotation |
-| 5–6 | Stripe Express provisioning, webhook handling, API key validation/rate limits |
+| 5–6 | Stripe Express provisioning ✓ (5c), webhook handling ✓ (5b/5c), API key validation/rate limits ✓ (5a); remaining: payment splitting (5d) |
 | 7–8 | Stream tables are already created; populate/verify data structures (no endpoints yet) |
 | 9–10 | Dashboard UI: network selector, user management, settings pages |
 | 11–12 | End-to-end testing: multi-network isolation, provisioning flow, RBAC enforcement |
@@ -602,7 +605,7 @@ Longest sequential dependency chain (blocks completion date):
 
 Done since: API key validation + rate limiting (5a).
 
-Webhook delivery + HMAC signing built (5b). Next: Stripe Express provisioning (5c), key rotation, audit endpoints.
+Webhook delivery + HMAC signing built (5b). Stripe Express provisioning built (5c). Next: payment splitting / application fees (5d), key rotation, audit endpoints.
 
 Now that network provisioning and RBAC are working, build the management endpoints:
 
