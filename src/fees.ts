@@ -1,9 +1,14 @@
-export const PLATFORM_FEE_PERCENT = 20;
+/** A platform fee rate as stored in networks.platform_fee_percent: a whole percent, 0-100. */
+export const isValidFeePercent = (n: unknown): n is number => typeof n === "number" && Number.isInteger(n) && n >= 0 && n <= 100;
 
-/** Split a gross amount (cents). Fee rounds to the nearest cent; creator gets the remainder, so the parts always sum to gross. */
-export function splitAmount(grossCents: number) {
+/**
+ * Split a gross amount (cents) at `percent` (the network's platform_fee_percent). The fee rounds to the
+ * nearest cent; the creator gets the remainder, so the parts always sum to gross.
+ */
+export function splitAmount(grossCents: number, percent: number) {
   if (!Number.isInteger(grossCents) || grossCents < 0) throw new Error("gross must be a non-negative integer");
-  const platformFeeCents = Math.round((grossCents * PLATFORM_FEE_PERCENT) / 100);
+  if (!isValidFeePercent(percent)) throw new Error("fee percent must be an integer from 0 to 100");
+  const platformFeeCents = Math.round((grossCents * percent) / 100);
   return { grossCents, platformFeeCents, creatorCents: grossCents - platformFeeCents };
 }
 

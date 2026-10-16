@@ -206,9 +206,17 @@ Existing Phase 1 rows are backfilled into a seeded `net_freqone` network by the 
 1. **Register creator account + network, atomically** — `POST /api/auth/creator-register` inserts the user and the `networks` row (slug from creator name, `status='active'`) in one D1 batch. A duplicate email rolls back both; a slug collision gets a random suffix. No orphan networks.
 2. **Shared schema** — Network tables already exist; no per-network DB creation needed.
 3. **Create API keys** — Generate 2 keys: public (for browser embed) and private (server-to-server). Plaintext is returned once in the signup response; only SHA-256 hashes (plus last-4 hints) are stored.
-4. **Stripe Express account (lazy, built in 5c)** — Signup returns `stripe: { status: "not_connected" }`. The owner calls `POST /api/networks/{id}/stripe/onboard`, which creates the Express account on first use (idempotent per network), stores `stripe_account_id`, and returns a fresh onboarding link each time. Per-creator Express onboarding already exists separately at `/api/creator/connect/*` and is unchanged. `account.updated` (via `/api/webhooks/stripe-connect`) keeps `stripe_charges_enabled` / `stripe_payouts_enabled` / `stripe_details_submitted` current (migration 0008); `active` means charges and payouts are both enabled. Payment splitting and platform fees are 5d.
+4. **Stripe Express account (lazy, built in 5c)** — Signup returns `stripe: { status: "not_connected" }`. The owner calls `POST /api/networks/{id}/stripe/onboard`, which creates the Express account on first use (idempotent per network), stores `stripe_account_id`, and returns a fresh onboarding link each time. Per-creator Express onboarding already exists separately at `/api/creator/connect/*` and is unchanged. `account.updated` (via `/api/webhooks/stripe-connect`) keeps `stripe_charges_enabled` / `stripe_payouts_enabled` / `stripe_details_submitted` current (migration 0008); `active` means charges and payouts are both enabled. Payment splitting is built (5d): see below.
 5. **DNS + CORS (not yet built)** — Optional subdomain `<network-slug>.freq.one` and per-network CORS origins.
 6. **Storage prefix** — Uploads go under `networks/<network_id>/…`.
+
+### Payment Splitting (5d, built)
+
+- **Payee:** paid content goes to the *network's* Stripe Express account (`networks.stripe_account_id`) as a destination charge: `POST /api/purchases` uses the episode's `network_id`, `POST /api/subscriptions` the creator's `users.network_id`. The creator's own Connect account (`/api/creator/connect/*`) is no longer the payee for network content; those routes are unchanged.
+- **Gate:** checkout is refused with `409 { "error": "network cannot accept payments yet" }` unless the network's Stripe status is `active` (charges and payouts enabled). There is no fallback to the creator account.
+- **Fee:** `networks.platform_fee_percent` (default 15), a whole percent 0–100, frozen into the Checkout metadata (`fee_percent`, with `network_id`) at checkout time. Revenue is booked at Stripe's applied `application_fee_amount` when present (invoices), else the frozen `fee_percent`, else the network's current rate. `splitAmount(gross, percent)` has no default rate; the fee rounds to the nearest cent and the remainder goes to the creator.
+- **Attribution:** `purchases`, `subscriptions` and `revenue` rows carry `network_id`, taken from our own episode/creator rows, never from metadata (migration 0009 adds `revenue.network_id` and backfills).
+- **Not in 5d (5e):** the `payouts` table and `onPayout` are still keyed by creator, so payouts to a network account are not recorded yet, and the creator earnings views still read per-creator revenue.
 
 Accounts with no network (viewers) can create one later via `POST /api/networks/create`, which returns a fresh token.
 
@@ -316,7 +324,7 @@ Tokens issued before this change are rejected once; users log in again.
 |------|------|
 | 1–2 | Network provisioning, JWT/RBAC enforcement, query scoping, isolation tests ✓ |
 | 3–4 | User management, invites, settings, webhook registration ✓; remaining: audit endpoints, token rotation |
-| 5–6 | Stripe Express provisioning ✓ (5c), webhook handling ✓ (5b/5c), API key validation/rate limits ✓ (5a); remaining: payment splitting (5d) |
+| 5–6 | Stripe Express provisioning ✓ (5c), webhook handling ✓ (5b/5c), API key validation/rate limits ✓ (5a); payment splitting ✓ (5d); remaining: network payouts/earnings views (5e) |
 | 7–8 | Stream tables are already created; populate/verify data structures (no endpoints yet) |
 | 9–10 | Dashboard UI: network selector, user management, settings pages |
 | 11–12 | End-to-end testing: multi-network isolation, provisioning flow, RBAC enforcement |
@@ -327,7 +335,7 @@ Tokens issued before this change are rejected once; users log in again.
 - ☑ Multiple networks coexist on the same database with no cross-network leakage on creator routes (proven by tests)
 - ☑ Network provisioning (signup → network + API keys + Stripe placeholder) works end-to-end
 - ☑ RBAC enforced on creator routes: guests are blocked, other networks' episodes are invisible
-- ☐ Each network's Stripe account receives correct payouts minus platform fee
+- ◐ Each network's Stripe account receives correct payouts minus platform fee (charges are split to the network account at `networks.platform_fee_percent`: ✓ 5d; recording and showing network payouts/earnings: 5e)
 - ☑ API keys generate, validate (SHA-256 lookup) and rate-limit (D1 fixed-window counter: 1000/hr public, 10k/hr private)
 - ☑ Webhooks signed and routed to correct network handler (HMAC-SHA256 `X-Webhook-Signature`, encrypted secrets, 4 attempts at 0/5/15/60 min, cron-driven delivery, network-isolated; tests in `test/webhook-delivery.test.ts`)
 - ☑ Live streaming tables exist, schema supports guest RTMP ingest + recording storage
@@ -606,7 +614,7 @@ Longest sequential dependency chain (blocks completion date):
 
 Done since: API key validation + rate limiting (5a).
 
-Webhook delivery + HMAC signing built (5b). Stripe Express provisioning built (5c). Next: payment splitting / application fees (5d), key rotation, audit endpoints.
+Webhook delivery + HMAC signing built (5b). Stripe Express provisioning built (5c). Payment splitting built (5d). Next: network payouts/earnings (5e), key rotation, audit endpoints.
 
 Now that network provisioning and RBAC are working, build the management endpoints:
 
