@@ -10,7 +10,7 @@ export const LIMITS = { public: 1000, private: 10_000 } as const; // requests pe
 export async function publishedEpisodeView(env: Env, id: string) {
   const r = await env.DB.prepare(
     `SELECT e.id, e.title, e.description, e.thumbnail_key, e.metadata_tags, e.publish_date, e.one_time_price_cents,
-            e.view_count, e.summary, e.ai_tags, e.key_quotes, (e.transcript_text IS NOT NULL) AS has_transcript, u.creator_name
+            e.view_count, e.creator_id, e.summary, e.ai_tags, e.key_quotes, (e.transcript_text IS NOT NULL) AS has_transcript, u.creator_name
      FROM episodes e JOIN users u ON u.id = e.creator_id
      WHERE e.id = ? AND e.is_published = 1`,
   )
@@ -30,6 +30,7 @@ export async function publishedEpisodeView(env: Env, id: string) {
     oneTimePriceCents: r.one_time_price_cents,
     viewCount: r.view_count,
     creatorName: r.creator_name,
+    creatorId: r.creator_id,
     thumbnailUrl: r.thumbnail_key ? await signedViewUrl(env, r.thumbnail_key) : null,
   };
 }

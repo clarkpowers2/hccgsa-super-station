@@ -215,14 +215,47 @@ billing.get("/viewer/purchases", requireAuth, async (c) => {
 
 // ---- paid playback ---------------------------------------------------------
 
-/** Access = the creator, a buyer of this episode, or an active subscriber to the creator. */
-export async function hasEpisodeAccess(env: Env, userId: string, ep: { id: string; creator_id: string }) {
-  return (
-    ep.creator_id === userId ||
-    (await hasPurchased(env, userId, ep.id)) ||
-    (await hasActiveSubscription(env, userId, ep.creator_id))
-  );
+export type AccessReason = "owner" | "purchased" | "subscribed" | "none";
+
+/** Why a user can play an episode: the creator, a buyer of this episode, or an active subscriber to the creator. */
+export async function episodeAccessReason(env: Env, userId: string, ep: { id: string; creator_id: string }): Promise<AccessReason> {
+  if (ep.creator_id === userId) return "owner";
+  if (await hasPurchased(env, userId, ep.id)) return "purchased";
+  if (await hasActiveSubscription(env, userId, ep.creator_id)) return "subscribed";
+  return "none";
 }
+
+export async function hasEpisodeAccess(env: Env, userId: string, ep: { id: string; creator_id: string }) {
+  return (await episodeAccessReason(env, userId, ep)) !== "none";
+}
+
+// Read-only access check for the listener UI: no view_count change, no signed URLs.
+billing.get("/episodes/:id/access", requireAuth, async (c) => {
+  const userId = c.get("user").sub;
+  const ep = await c.env.DB.prepare("SELECT id, creator_id, is_published FROM episodes WHERE id = ?")
+    .bind(c.req.param("id"))
+    .first<{ id: string; creator_id: string; is_published: number }>();
+  if (!ep || (!ep.is_published && ep.creator_id !== userId)) return c.json({ error: "not found" }, 404);
+  const reason = await episodeAccessReason(c.env, userId, ep);
+  return c.json({ hasAccess: reason !== "none", reason });
+});
+
+// Public creator profile: published episodes only, no email, Stripe ids or network internals.
+billing.get("/creators/:id", async (c) => {
+  const creator = await loadCreator(c.env, c.req.param("id"));
+  if (!creator) return c.json({ error: "not found" }, 404);
+  const { results } = await c.env.DB.prepare(
+    "SELECT id, title, one_time_price_cents, publish_date FROM episodes WHERE creator_id = ? AND is_published = 1 ORDER BY publish_date DESC, id LIMIT 100",
+  )
+    .bind(creator.id)
+    .all<{ id: string; title: string; one_time_price_cents: number | null; publish_date: string | null }>();
+  return c.json({
+    id: creator.id,
+    creatorName: creator.creator_name,
+    subscriptionPriceCents: creator.subscription_price_cents ?? null,
+    episodes: results.map((r) => ({ id: r.id, title: r.title, priceCents: r.one_time_price_cents, publishDate: r.publish_date })),
+  });
+});
 
 billing.get("/episodes/:id/stream", requireAuth, async (c) => {
   const userId = c.get("user").sub;
