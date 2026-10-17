@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import { auth } from "./auth";
+import { auth, requireAuth } from "./auth";
 import { creator } from "./episodes";
 import { billing } from "./billing";
 import { creatorBilling } from "./creator-billing";
@@ -30,6 +30,25 @@ const dashboardCors = cors({
 app.use("/api/*", (c, next) => (c.req.path.startsWith("/api/public/") ? next() : dashboardCors(c, next)));
 
 app.get("/api/health", (c) => c.json({ status: "ok", environment: c.env.ENVIRONMENT }));
+
+// Who am I: read fresh from the users row, never from the token claims, so a role or network
+// change shows up on the next call. requireAuth has already rejected deleted users.
+app.get("/api/me", requireAuth, async (c) => {
+  const row = await c.env.DB.prepare(
+    "SELECT id, email, creator_name, role, network_id, is_creator FROM users WHERE id = ? AND deleted_at IS NULL",
+  )
+    .bind(c.get("user").sub)
+    .first<{ id: string; email: string; creator_name: string; role: string; network_id: string | null; is_creator: number }>();
+  if (!row) return c.json({ error: "unauthorized" }, 401);
+  return c.json({
+    id: row.id,
+    email: row.email,
+    creatorName: row.creator_name,
+    role: row.role,
+    networkId: row.network_id,
+    isCreator: row.is_creator === 1,
+  });
+});
 app.route("/api/auth", auth);
 app.route("/api/creator", creator);
 app.route("/api/creator", creatorBilling);
