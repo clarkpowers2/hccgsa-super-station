@@ -45,7 +45,7 @@ TRANSCRIBE_MAX_BYTES = "25165824"
 [[env.staging.d1_databases]]
 binding = "DB"
 database_name = "hccgsa-broadcast-staging"
-database_id = "REPLACE_WITH_STAGING_D1_ID"
+database_id = "e9dec6ec-f254-4d65-aed5-fbc5ff3b3409"
 
 # Shares the production bucket for now. A separate staging bucket is recommended before live
 # (staging test uploads would otherwise sit next to real media). If you change it, change
