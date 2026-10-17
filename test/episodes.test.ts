@@ -8,8 +8,14 @@ async function setup() {
   return { ...t, me, episodeId: ep.json.id as string };
 }
 
-const requestUpload = (env: any, token: string, id: string, body: unknown) =>
-  call(env, "POST", `/api/creator/episodes/${id}/uploads`, { token, body });
+const EXT: Record<string, string> = { "video/mp4": "mp4", "video/webm": "webm", "video/quicktime": "mov", "audio/mpeg": "mp3", "audio/webm": "weba" };
+
+// Adds a matching filename for audio/video unless the test sets one, so existing cases keep their intent.
+const requestUpload = (env: any, token: string, id: string, body: any) =>
+  call(env, "POST", `/api/creator/episodes/${id}/uploads`, {
+    token,
+    body: body && body.filename === undefined && EXT[body.contentType] ? { ...body, filename: `clip.${EXT[body.contentType]}` } : body,
+  });
 
 describe("access control", () => {
   it("requires a token and a creator account", async () => {
@@ -89,6 +95,54 @@ describe("upload flow", () => {
     expect((await requestUpload(env, me.token, episodeId, { kind: "video", contentType: "text/html", sizeBytes: 1 })).status).toBe(400);
     expect((await requestUpload(env, me.token, episodeId, { kind: "video", contentType: "video/mp4", sizeBytes: 0 })).status).toBe(400);
     expect((await requestUpload(env, me.token, episodeId, { kind: "thumbnail", contentType: "image/png", sizeBytes: 6 * 1024 * 1024 })).status).toBe(413);
+  });
+
+  const ALLOWED: [string, string, string, string][] = [
+    ["audio", "audio/mpeg", "a.mp3", "mp3"],
+    ["audio", "audio/mp4", "a.m4a", "m4a"],
+    ["audio", "audio/x-m4a", "a.M4A", "m4a"],
+    ["audio", "audio/aac", "a.aac", "aac"],
+    ["audio", "audio/wav", "a.wav", "wav"],
+    ["audio", "audio/x-wav", "a.wav", "wav"],
+    ["audio", "audio/ogg", "a.ogg", "ogg"],
+    ["audio", "audio/ogg", "a.opus", "ogg"],
+    ["audio", "audio/webm", "a.weba", "weba"],
+    ["audio", "audio/webm", "a.webm", "weba"],
+    ["audio", "audio/flac", "a.flac", "flac"],
+    ["video", "video/mp4", "v.mp4", "mp4"],
+    ["video", "video/webm", "v.webm", "webm"],
+    ["video", "video/quicktime", "v.mov", "mov"],
+  ];
+
+  it.each(ALLOWED)("accepts %s %s as %s and binds the signature to the content type", async (kind, contentType, filename, keyExt) => {
+    const { env, me, episodeId } = await setup();
+    const r = await requestUpload(env, me.token, episodeId, { kind, contentType, filename, sizeBytes: 1000 });
+    expect(r.status).toBe(200);
+    expect(r.json.key).toMatch(new RegExp(`/${kind}/[0-9a-f-]+\\.${keyExt}$`));
+    expect(new URL(r.json.uploadUrl).searchParams.get("X-Amz-SignedHeaders")).toBe("content-type;host");
+    expect(r.json.headers).toEqual({ "Content-Type": contentType });
+  });
+
+  it("refuses an extension that disagrees with the content type, or a missing file name", async () => {
+    const { env, me, episodeId } = await setup();
+    const up = (body: any) => requestUpload(env, me.token, episodeId, { sizeBytes: 10, ...body });
+    expect((await up({ kind: "audio", contentType: "audio/mpeg", filename: "a.wav" })).status).toBe(400);
+    expect((await up({ kind: "video", contentType: "video/mp4", filename: "v.mov" })).status).toBe(400);
+    expect((await up({ kind: "audio", contentType: "audio/mpeg", filename: "mp3" })).status).toBe(400);
+    expect((await up({ kind: "audio", contentType: "audio/mpeg", filename: null })).status).toBe(400);
+    const r = await up({ kind: "video", contentType: "video/mp4", filename: "v.mkv" });
+    expect(r.json.error).toBe("Unsupported file type. Upload audio (MP3, M4A, WAV, OGG, FLAC) or video (MP4, WebM, MOV).");
+  });
+
+  it("refuses disallowed types and audio/video content types under the wrong kind", async () => {
+    const { env, me, episodeId } = await setup();
+    const up = (body: any) => requestUpload(env, me.token, episodeId, { sizeBytes: 10, ...body });
+    for (const [contentType, filename] of [["application/x-msdownload", "a.exe"], ["application/pdf", "a.pdf"], ["application/zip", "a.zip"]]) {
+      expect((await up({ kind: "audio", contentType, filename })).status).toBe(400);
+      expect((await up({ kind: "video", contentType, filename })).status).toBe(400);
+    }
+    expect((await up({ kind: "video", contentType: "audio/mpeg", filename: "a.mp3" })).status).toBe(400);
+    expect((await up({ kind: "audio", contentType: "video/mp4", filename: "v.mp4" })).status).toBe(400);
   });
 
   it("returns 503 when storage credentials are missing", async () => {

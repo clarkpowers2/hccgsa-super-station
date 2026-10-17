@@ -31,7 +31,7 @@ async function world() {
 
 /** Upload audio through the real API flow so enqueue-on-upload is exercised. */
 async function uploadAudio(w: Awaited<ReturnType<typeof world>>, size = 1000) {
-  const up = await call(w.env, "POST", `/api/creator/episodes/${w.episodeId}/uploads`, { token: w.creator.token, body: { kind: "audio", contentType: "audio/mpeg", sizeBytes: size } });
+  const up = await call(w.env, "POST", `/api/creator/episodes/${w.episodeId}/uploads`, { token: w.creator.token, body: { kind: "audio", contentType: "audio/mpeg", filename: "a.mp3", sizeBytes: size } });
   w.objects.set(up.json.key, { size, httpMetadata: { contentType: "audio/mpeg" } });
   const done = await call(w.env, "POST", `/api/creator/episodes/${w.episodeId}/uploads/complete`, { token: w.creator.token, body: { kind: "audio", key: up.json.key } });
   return { key: up.json.key as string, done };
@@ -50,7 +50,7 @@ describe("queueing", () => {
   it("video and thumbnail uploads do not queue a transcript", async () => {
     const w = await world();
     for (const [kind, contentType] of [["video", "video/mp4"], ["thumbnail", "image/png"]] as const) {
-      const up = await call(w.env, "POST", `/api/creator/episodes/${w.episodeId}/uploads`, { token: w.creator.token, body: { kind, contentType, sizeBytes: 10 } });
+      const up = await call(w.env, "POST", `/api/creator/episodes/${w.episodeId}/uploads`, { token: w.creator.token, body: { kind, contentType, filename: kind === "video" ? "v.mp4" : undefined, sizeBytes: 10 } });
       w.objects.set(up.json.key, { size: 10, httpMetadata: { contentType } });
       await call(w.env, "POST", `/api/creator/episodes/${w.episodeId}/uploads/complete`, { token: w.creator.token, body: { kind, key: up.json.key } });
     }

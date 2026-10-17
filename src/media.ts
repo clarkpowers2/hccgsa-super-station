@@ -6,7 +6,8 @@ export type MediaKind = "video" | "audio" | "thumbnail";
 interface KindPolicy {
   column: "video_key" | "audio_key" | "thumbnail_key";
   maxBytes: number;
-  types: Record<string, string>; // content-type -> file extension
+  types: Record<string, string>; // content-type -> file extension used in the storage key
+  extensions?: Record<string, string[]>; // content-type -> client file extensions accepted (audio/video only)
 }
 
 const MB = 1024 * 1024;
@@ -16,6 +17,7 @@ export const MEDIA_POLICY: Record<MediaKind, KindPolicy> = {
     column: "video_key",
     maxBytes: 2048 * MB,
     types: { "video/mp4": "mp4", "video/webm": "webm", "video/quicktime": "mov" },
+    extensions: { "video/mp4": ["mp4"], "video/webm": ["webm"], "video/quicktime": ["mov"] },
   },
   audio: {
     column: "audio_key",
@@ -23,10 +25,24 @@ export const MEDIA_POLICY: Record<MediaKind, KindPolicy> = {
     types: {
       "audio/mpeg": "mp3",
       "audio/mp4": "m4a",
+      "audio/x-m4a": "m4a",
+      "audio/aac": "aac",
       "audio/wav": "wav",
       "audio/x-wav": "wav",
-      "audio/webm": "webm",
+      "audio/webm": "weba",
       "audio/ogg": "ogg",
+      "audio/flac": "flac",
+    },
+    extensions: {
+      "audio/mpeg": ["mp3"],
+      "audio/mp4": ["m4a"],
+      "audio/x-m4a": ["m4a"],
+      "audio/aac": ["aac"],
+      "audio/wav": ["wav"],
+      "audio/x-wav": ["wav"],
+      "audio/webm": ["weba", "webm"],
+      "audio/ogg": ["ogg", "opus"],
+      "audio/flac": ["flac"],
     },
   },
   thumbnail: {
@@ -34,6 +50,15 @@ export const MEDIA_POLICY: Record<MediaKind, KindPolicy> = {
     maxBytes: 5 * MB,
     types: { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp" },
   },
+};
+
+export const UNSUPPORTED_MEDIA_MESSAGE = "Unsupported file type. Upload audio (MP3, M4A, WAV, OGG, FLAC) or video (MP4, WebM, MOV).";
+
+/** True when the file name's extension is one the allowlist pairs with this content type. */
+export const extensionMatches = (kind: MediaKind, contentType: string, filename: string): boolean => {
+  const allowed = MEDIA_POLICY[kind].extensions?.[contentType];
+  const dot = filename.lastIndexOf(".");
+  return !!allowed && dot > 0 && allowed.includes(filename.slice(dot + 1).toLowerCase());
 };
 
 export const isMediaKind = (v: unknown): v is MediaKind =>

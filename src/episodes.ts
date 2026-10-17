@@ -8,6 +8,8 @@ import {
   MEDIA_POLICY,
   UPLOAD_URL_TTL_SECONDS,
   isMediaKind,
+  extensionMatches,
+  UNSUPPORTED_MEDIA_MESSAGE,
   keyPrefix,
   r2Configured,
   signedUploadUrl,
@@ -267,11 +269,14 @@ creator.post("/episodes/:id/uploads", async (c) => {
   if (!row) return c.json({ error: "not found" }, 404);
   if (!r2Configured(c.env)) return c.json({ error: "storage not configured" }, 503);
 
-  const body = (await c.req.json().catch(() => ({}))) as { kind?: unknown; contentType?: unknown; sizeBytes?: unknown };
+  const body = (await c.req.json().catch(() => ({}))) as { kind?: unknown; contentType?: unknown; sizeBytes?: unknown; filename?: unknown };
   if (!isMediaKind(body.kind)) return c.json({ error: "kind must be video, audio or thumbnail" }, 400);
   const policy = MEDIA_POLICY[body.kind];
   if (typeof body.contentType !== "string" || !Object.prototype.hasOwnProperty.call(policy.types, body.contentType))
-    return c.json({ error: `unsupported contentType for ${body.kind}`, allowed: Object.keys(policy.types) }, 400);
+    return c.json({ error: UNSUPPORTED_MEDIA_MESSAGE, allowed: Object.keys(policy.types) }, 400);
+  // Audio/video: the file name's extension must agree with the declared content type.
+  if (policy.extensions && (typeof body.filename !== "string" || !extensionMatches(body.kind, body.contentType, body.filename)))
+    return c.json({ error: UNSUPPORTED_MEDIA_MESSAGE, allowed: Object.keys(policy.types) }, 400);
   if (typeof body.sizeBytes !== "number" || !Number.isInteger(body.sizeBytes) || body.sizeBytes <= 0)
     return c.json({ error: "sizeBytes must be a positive integer" }, 400);
   if (body.sizeBytes > policy.maxBytes) return c.json({ error: "file too large", maxBytes: policy.maxBytes }, 413);
