@@ -98,6 +98,50 @@ networks.put("/:networkId/settings", ...adminUp, async (c) => {
   return c.json(await networkView(c));
 });
 
+// ---- earnings & payouts (5e) ---------------------------------------------------
+
+// Revenue attributed to this network (5d). networkCents is what Stripe routes to the network's own account.
+networks.get("/:networkId/earnings", ...adminUp, async (c) => {
+  const { results } = await c.env.DB.prepare(
+    `SELECT substr(occurred_at, 1, 7) AS month, COUNT(*) AS charges, SUM(gross_cents) AS gross,
+            SUM(platform_fee_cents) AS fee, SUM(creator_cents) AS net
+     FROM revenue WHERE network_id = ? GROUP BY month ORDER BY month DESC`,
+  )
+    .bind(c.get("user").networkId)
+    .all<{ month: string; charges: number; gross: number; fee: number; net: number }>();
+  const months = results.map((r) => ({
+    month: r.month,
+    charges: r.charges,
+    grossCents: r.gross,
+    platformFeeCents: r.fee,
+    networkCents: r.net,
+  }));
+  const sum = (k: "grossCents" | "platformFeeCents" | "networkCents") => months.reduce((a, m) => a + m[k], 0);
+  return c.json({
+    lifetime: { grossCents: sum("grossCents"), platformFeeCents: sum("platformFeeCents"), networkCents: sum("networkCents") },
+    months,
+  });
+});
+
+// Same field shape as GET /api/creator/payouts.
+networks.get("/:networkId/payouts", ...adminUp, async (c) => {
+  const { results } = await c.env.DB.prepare(
+    "SELECT stripe_payout_id, amount_cents, currency, status, arrival_date, paid_at FROM payouts WHERE network_id = ? ORDER BY created_at DESC, id",
+  )
+    .bind(c.get("user").networkId)
+    .all<Record<string, unknown>>();
+  return c.json({
+    payouts: results.map((r) => ({
+      id: r.stripe_payout_id,
+      amountCents: r.amount_cents,
+      currency: r.currency,
+      status: r.status,
+      arrivalDate: r.arrival_date,
+      paidAt: r.paid_at,
+    })),
+  });
+});
+
 // ---- users & invites ---------------------------------------------------------
 
 networks.get("/:networkId/users", ...adminUp, async (c) => {
