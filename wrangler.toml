@@ -1,3 +1,4 @@
+# PRODUCTION (top level): do NOT deploy until Stage 2. Staging is `--env staging` below.
 # No secrets here. Secrets: `npx wrangler secret put <NAME>` (see .dev.vars.example).
 name = "hccgsa-broadcast-api"
 main = "src/index.ts"
@@ -24,3 +25,37 @@ binding = "AI"
 
 [triggers]
 crons = ["* * * * *"] # transcription queue worker
+
+# ───────── Staging (Stage 1: Stripe TEST keys) ─────────
+# Deploy with `--env staging`. Wrangler does not inherit bindings or vars into an env,
+# so everything the worker needs is repeated here. Secrets are set per env:
+# `npx wrangler secret put NAME --env staging` (use test-mode and staging-only values).
+[env.staging]
+name = "hccgsa-broadcast-api-staging"
+
+[env.staging.vars]
+ENVIRONMENT = "staging"
+R2_BUCKET_NAME = "hccgsa-broadcast-media" # TODO before live: use a separate staging bucket
+APP_URL = "https://freq-one-dashboard.pages.dev"
+CORS_ORIGINS = "https://freq-one-dashboard.pages.dev"
+DASHBOARD_URL = "https://freq-one-dashboard.pages.dev"
+ANTHROPIC_MODEL = "claude-opus-5-5"
+TRANSCRIBE_MAX_BYTES = "25165824"
+
+[[env.staging.d1_databases]]
+binding = "DB"
+database_name = "hccgsa-broadcast-staging"
+database_id = "REPLACE_WITH_STAGING_D1_ID"
+
+# Shares the production bucket for now. A separate staging bucket is recommended before live
+# (staging test uploads would otherwise sit next to real media). If you change it, change
+# R2_BUCKET_NAME above and the staging R2 token scope too.
+[[env.staging.r2_buckets]]
+binding = "MEDIA"
+bucket_name = "hccgsa-broadcast-media"
+
+[env.staging.ai]
+binding = "AI"
+
+[env.staging.triggers]
+crons = ["*/5 * * * *"] # every 5 minutes, to limit background usage

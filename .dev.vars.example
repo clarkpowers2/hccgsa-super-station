@@ -10,3 +10,6 @@ R2_ACCOUNT_ID=your_cloudflare_account_id_here
 R2_ACCESS_KEY_ID=your_r2_access_key_id_here
 R2_SECRET_ACCESS_KEY=your_r2_secret_access_key_here
 WEBHOOK_ENC_KEY=your_base64_32_byte_key_here
+# Dashboard origin(s) allowed by CORS (comma-separated) and used for invite links
+CORS_ORIGINS=YOUR_DASHBOARD_ORIGIN_HERE
+DASHBOARD_URL=YOUR_DASHBOARD_URL_HERE
