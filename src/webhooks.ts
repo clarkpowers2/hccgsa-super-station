@@ -27,6 +27,7 @@ async function upsertSubscription(
 ) {
   const conflict = opts.overwrite
     ? `DO UPDATE SET status = excluded.status,
+         network_id = COALESCE(subscriptions.network_id, excluded.network_id),
          next_billing_date = COALESCE(excluded.next_billing_date, subscriptions.next_billing_date),
          canceled_at = CASE WHEN excluded.status = 'canceled' THEN datetime('now') ELSE subscriptions.canceled_at END,
          updated_at = datetime('now')
@@ -61,6 +62,16 @@ async function recordRevenue(
   )
     .bind(crypto.randomUUID(), r.creatorId, r.networkId, r.viewerId, r.source, r.objectId, r.gross, r.fee, r.gross - r.fee, sqlTime(r.at))
     .run();
+}
+
+/** The network every legacy session/row falls back to (same seed as migrations 0004, 0009 and 0010). */
+const LEGACY_NETWORK_ID = "net_freqone";
+
+/** Money writes must never carry a NULL network. Log the event id (no PII) when the fallback is used. */
+function networkOrLegacy(networkId: string | null | undefined, eventId: string): string {
+  if (networkId) return networkId;
+  console.warn("network_id unresolved, using legacy network", eventId);
+  return LEGACY_NETWORK_ID;
 }
 
 async function userExists(env: Env, id: string | undefined) {
@@ -104,31 +115,33 @@ async function onCheckoutCompleted(env: Env, event: StripeEvent) {
       return; // nothing we can attach it to; don't make Stripe retry forever
     }
     const gross = s.amount_total as number;
+    const networkId = networkOrLegacy(episode.network_id, event.id);
     await env.DB.prepare(
       `INSERT OR IGNORE INTO purchases (id, viewer_id, episode_id, network_id, stripe_payment_intent_id, amount_cents, status, purchased_at)
        VALUES (?, ?, ?, ?, ?, ?, 'completed', datetime('now'))`,
     )
-      .bind(crypto.randomUUID(), meta.viewer_id, episode.id, episode.network_id, s.payment_intent, gross)
+      .bind(crypto.randomUUID(), meta.viewer_id, episode.id, networkId, s.payment_intent, gross)
       .run();
     await recordRevenue(env, {
       creatorId: episode.creator_id,
-      networkId: episode.network_id,
+      networkId,
       viewerId: meta.viewer_id,
       source: "purchase",
       objectId: s.payment_intent,
       gross,
-      fee: splitAmount(gross, await feePercentFor(env, meta.fee_percent, episode.network_id)).platformFeeCents,
+      fee: splitAmount(gross, await feePercentFor(env, meta.fee_percent, networkId)).platformFeeCents,
       at: event.created,
     });
     return;
   }
 
   if (meta.type === "subscription" && s.subscription) {
-    const networkId = await creatorNetworkId(env, meta.creator_id);
-    if (!(await userExists(env, meta.viewer_id)) || networkId === undefined) {
+    const resolved = await creatorNetworkId(env, meta.creator_id);
+    if (!(await userExists(env, meta.viewer_id)) || resolved === undefined) {
       console.error("checkout for unknown viewer/creator", event.id);
       return;
     }
+    const networkId = networkOrLegacy(resolved, event.id);
     await upsertSubscription(
       env,
       {
@@ -152,11 +165,12 @@ async function onInvoicePaid(env: Env, event: StripeEvent) {
   const inv = event.data.object;
   const meta = inv.subscription_details?.metadata ?? {};
   if (!inv.subscription || meta.type !== "subscription" || !(inv.amount_paid > 0)) return;
-  const networkId = await creatorNetworkId(env, meta.creator_id);
-  if (networkId === undefined) {
+  const resolved = await creatorNetworkId(env, meta.creator_id);
+  if (resolved === undefined) {
     console.error("invoice for unknown creator", event.id);
     return;
   }
+  const networkId = networkOrLegacy(resolved, event.id);
   const gross = inv.amount_paid as number;
   // Prefer the fee Stripe actually applied; else the rate frozen at checkout; else the network's current rate.
   const fee =
@@ -179,8 +193,9 @@ async function onSubscriptionChanged(env: Env, event: StripeEvent) {
   const sub = event.data.object;
   const meta = sub.metadata ?? {};
   if (meta.type !== "subscription") return;
-  const networkId = await creatorNetworkId(env, meta.creator_id);
-  if (!(await userExists(env, meta.viewer_id)) || networkId === undefined) return;
+  const resolved = await creatorNetworkId(env, meta.creator_id);
+  if (!(await userExists(env, meta.viewer_id)) || resolved === undefined) return;
+  const networkId = networkOrLegacy(resolved, event.id);
   const status = event.type === "customer.subscription.deleted" ? "canceled" : mapStatus(sub.status);
   await upsertSubscription(
     env,
@@ -223,19 +238,31 @@ async function onAccountUpdated(env: Env, event: StripeEvent) {
 
 async function onPayout(env: Env, event: StripeEvent) {
   const p = event.data.object;
-  const owner = event.account
-    ? await env.DB.prepare("SELECT id FROM users WHERE stripe_account_id = ?").bind(event.account).first<{ id: string }>()
-    : null;
-  if (!owner) return; // not one of our creators
+  if (!event.account) return;
+  // A network's Express account first (5e): booked to the network, no creator. Else a creator's own account.
+  const net = await env.DB.prepare("SELECT id FROM networks WHERE stripe_account_id = ?").bind(event.account).first<{ id: string }>();
+  let creatorId: string | null = null;
+  let networkId: string | null = null;
+  if (net) {
+    networkId = net.id;
+  } else {
+    const owner = await env.DB.prepare("SELECT id, network_id FROM users WHERE stripe_account_id = ?")
+      .bind(event.account)
+      .first<{ id: string; network_id: string | null }>();
+    if (!owner) return; // not one of our accounts
+    creatorId = owner.id;
+    networkId = owner.network_id;
+  }
   const status = event.type === "payout.paid" ? "paid" : "failed";
   await env.DB.prepare(
-    `INSERT INTO payouts (id, creator_id, stripe_payout_id, amount_cents, currency, status, arrival_date, paid_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO payouts (id, creator_id, network_id, stripe_payout_id, amount_cents, currency, status, arrival_date, paid_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(stripe_payout_id) DO UPDATE SET status = excluded.status, paid_at = excluded.paid_at`,
   )
     .bind(
       crypto.randomUUID(),
-      owner.id,
+      creatorId,
+      networkId,
       p.id,
       p.amount,
       p.currency ?? "usd",

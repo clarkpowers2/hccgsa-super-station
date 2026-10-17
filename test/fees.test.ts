@@ -38,8 +38,25 @@ describe("split at a given rate", () => {
       expect(() => splitAmount(1000, bad), String(bad)).toThrow();
     }
     expect(() => (splitAmount as any)(1000)).toThrow(); // every caller passes the rate
-    expect(isValidFeePercent(0) && isValidFeePercent(100) && isValidFeePercent(15)).toBe(true);
-    expect(isValidFeePercent(15.5) || isValidFeePercent("15") || isValidFeePercent(101)).toBe(false);
+  });
+});
+
+describe("isValidFeePercent", () => {
+  // One assertion per case, so a failure names the value that broke (the old chained || / && hid which).
+  it.each([0, 1, 15, 99, 100])("accepts the whole percent %s", (n) => {
+    expect(isValidFeePercent(n)).toBe(true);
+  });
+  it.each([
+    [-1, "below zero"],
+    [101, "above 100"],
+    [15.5, "fractional"],
+    [Number.NaN, "NaN"],
+    [Infinity, "Infinity"],
+    ["15", "a numeric string"],
+    [null, "null"],
+    [undefined, "undefined"],
+  ])("rejects %s (%s)", (n: unknown, _why: string) => {
+    expect(isValidFeePercent(n)).toBe(false);
   });
 });
 
