@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import type { Context } from "hono";
 import type { AppBindings, Role } from "./types";
 import { issueToken, requireAuth, requireNetwork, requireRole } from "./auth";
-import { provisionNetwork, randomHex, sha256Hex } from "./provision";
+import { newApiKeys, provisionNetwork, randomHex, sha256Hex } from "./provision";
 import { encryptSecret } from "./webhook-crypto";
 import { connectStatus } from "./stripe-express";
 
@@ -226,6 +226,24 @@ function validWebhookUrl(v: unknown): string | null {
     return null;
   }
 }
+
+// Rotates BOTH keys at once. The old public and private keys stop working immediately, because
+// only the new hashes are stored. Plaintext is returned once; a lost key is replaced by rotating again.
+networks.post("/:networkId/api-keys/rotate", ...ownerOnly, async (c) => {
+  const networkId = c.req.param("networkId");
+  const net = await c.env.DB.prepare("SELECT status FROM networks WHERE id = ?").bind(networkId).first<{ status: string }>();
+  if (!net || net.status !== "active") return c.json({ error: "network not found or not active" }, 404);
+  const { pub, priv } = newApiKeys();
+  await c.env.DB.prepare(
+    `UPDATE networks SET public_api_key_hash = ?, public_api_key_hint = ?,
+            private_api_key_hash = ?, private_api_key_hint = ?
+     WHERE id = ?`,
+  )
+    .bind(await sha256Hex(pub), pub.slice(-4), await sha256Hex(priv), priv.slice(-4), networkId)
+    .run();
+  console.log("api keys rotated", { networkId }); // identifiers only, never key material
+  return c.json({ apiKeys: { public: pub, private: priv } });
+});
 
 networks.post("/:networkId/webhooks", ...adminUp, async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as { url?: unknown; events?: unknown };

@@ -17,6 +17,11 @@ export const randomHex = (bytes: number) => toHex(crypto.getRandomValues(new Uin
 export const sha256Hex = async (key: string) =>
   toHex(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(key)));
 
+/** Fresh plaintext keys. Callers must store only their SHA-256 hashes and last-4 hints. */
+export function newApiKeys(): { pub: string; priv: string } {
+  return { pub: `pk_${randomHex(16)}`, priv: `sk_${randomHex(24)}` };
+}
+
 function slugify(name: string) {
   const s = name.toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40);
   return s || "network";
@@ -38,8 +43,7 @@ export async function provisionNetwork(
   const slug = taken ? `${base}-${randomHex(3)}` : base;
 
   const id = `net_${randomHex(8)}`;
-  const pub = `pk_${randomHex(16)}`;
-  const priv = `sk_${randomHex(24)}`;
+  const { pub, priv } = newApiKeys();
   await env.DB.batch([
     ...before,
     env.DB.prepare(
