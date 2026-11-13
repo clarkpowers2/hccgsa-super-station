@@ -336,7 +336,7 @@ Tokens issued before this change are rejected once; users log in again.
 | 5–6 | Stripe Express provisioning ✓ (5c), webhook handling ✓ (5b/5c), API key validation/rate limits ✓ (5a); payment splitting ✓ (5d); network payouts/earnings ✓ (5e) |
 | 7–8 | Stream tables are already created; populate/verify data structures (no endpoints yet) |
 | 9–10 | Dashboard UI: network selector, user management, settings pages |
-| 11–12 | End-to-end testing: multi-network isolation, provisioning flow, RBAC enforcement |
+| 11–12 | End-to-end testing: multi-network isolation, provisioning flow, RBAC enforcement (isolation e2e started: `test/e2e-isolation.test.ts`) |
 | 13–16 | Buffer, hardening, documentation |
 
 ### Success Criteria
@@ -656,3 +656,4 @@ These unblock the dashboard UI work (Week 9–10) and move toward the Phase 2 We
 | Date | Status | Notes |
 |------|--------|-------|
 | 2026-10-10 | Phase 2 Week 1–2 | Network provisioning, JWT/RBAC, query scoping and isolation tests done (migrations 0002, 32 tests passing). Admin endpoints next. |
+| 2026-11-13 | Phase 2 Week 11–12 | `test/e2e-isolation.test.ts`: cross-network access on the remaining episode routes, public-API draft hiding and public projection, guest 403 sweep across every creator/network-admin route, two-way webhook delivery isolation. Revocation and role-change cases already live in `network-admin.test.ts`. |
