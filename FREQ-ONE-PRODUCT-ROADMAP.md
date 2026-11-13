@@ -313,7 +313,7 @@ Emails are unique across all networks, and each user belongs to exactly one netw
 - Public key (for browser embeds) and private key (server-to-server) are shown once, at network creation
 - Only SHA-256 hashes are stored; keys cannot be recovered
 - Validation + rate limiting: built on `GET /api/public/episodes/:id` (bearer key; `X-RateLimit-*` and `Retry-After` headers; open CORS for browser embeds). Counters live in D1 (`rate_limits`) because Workers isolates share no memory, at the cost of one small write per request. Scope is global (any network's key reads any published episode) until subdomain scoping.
-- Not yet built: key rotation/regeneration endpoint
+- Rotation: `POST /api/networks/:networkId/api-keys/rotate` (owner only) issues new public and private keys in one step. The old keys stop working immediately; there is no grace period. Plaintext is returned once. Tested in `test/api-key-rotation.test.ts`.
 
 **R2 Key Prefix:**
 New uploads go under `networks/<network_id>/…`. Existing Phase 1 episodes keep their original keys and continue working.
