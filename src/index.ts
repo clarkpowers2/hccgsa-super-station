@@ -77,7 +77,7 @@ app.onError((err, c) => {
     console.error("stripe error", err.status, err.code); // code only: messages can echo request details
     return c.json({ error: "payment provider error" }, 502);
   }
-  console.error("unhandled error", err.message); // never log request bodies or secrets
+  console.error("unhandled error", err instanceof Error ? err.constructor.name : "unknown"); // type only: messages can carry request data
   return c.json({ error: "internal error" }, 500);
 });
 
